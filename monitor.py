@@ -19,13 +19,19 @@ from pathlib import Path
 ROOT = Path(__file__).parent
 BASE = "https://www.apple.com/hk/shop/pickup-message-recommendations"
 LOCATION = "hong kong"
-BUY = "https://www.apple.com/hk/shop/buy-iphone/iphone-18-pro/6.9-inch-display-{}-burgundy"
+# Same query params the store page itself sends on Add to Bag (full price, no AppleCare), minus the session token.
+BUY = ("https://www.apple.com/hk/shop/buy-iphone/iphone-18-pro/6.9-inch-display-{cap}-burgundy"
+       "?product={part}&purchaseOption=fullPrice&step=select&acpart=none")
+
+
+def buy_url(cap, part):
+    return BUY.format(cap=cap, part=part.replace("/", "%2F"))
 
 # iPhone 18 Pro Max Burgundy (part numbers from apple.com/hk iPhone 18 Pro page source)
 TARGETS = {
-    "MJXQ4ZA/A": ("256GB", BUY.format("256gb")),
-    "MJXV4ZA/A": ("512GB", BUY.format("512gb")),
-    "MJY04ZA/A": ("1TB", BUY.format("1tb")),
+    "MJXQ4ZA/A": ("256GB", buy_url("256gb", "MJXQ4ZA/A")),
+    "MJXV4ZA/A": ("512GB", buy_url("512gb", "MJXV4ZA/A")),
+    "MJY04ZA/A": ("1TB", buy_url("1tb", "MJY04ZA/A")),
 }
 # Each query hides its own product, so query every target plus non-target Pro Max parts.
 QUERIES = list(TARGETS) + ["MJY44ZA/A", "MJXN4ZA/A"]  # 2TB Burgundy, 256GB Black
@@ -159,7 +165,7 @@ def main():
     load_env()
     if "--selftest" in sys.argv:
         # Detect a model known to be in stock (2TB Burgundy at time of writing) and send a test Telegram.
-        t = {"MJY44ZA/A": ("2TB (SELF-TEST)", BUY.format("2tb"))}
+        t = {"MJY44ZA/A": ("2TB (SELF-TEST)", buy_url("2tb", "MJY44ZA/A"))}
         found = scan(targets=t, queries=["MJXQ4ZA/A"])
         msg = ("[TEST] " + fmt(found, t)) if found else "[TEST] monitor reachable, but 2TB stand-in not seen now"
         sys.exit(0 if notify(msg) else 1)
