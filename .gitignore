@@ -1,0 +1,12 @@
+.env
+.env.*
+!.env.example
+.lock
+*.tmp
+__pycache__/
+.DS_Store
+evidence/
+pw-profile/
+*.har
+pair_test.py
+monitor.log
