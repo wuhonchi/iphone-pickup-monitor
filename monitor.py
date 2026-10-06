@@ -47,7 +47,8 @@ def notify(text):
     """Return False only if Telegram is configured and sending failed."""
     print(text, flush=True)
     ok = True
-    token, chat = os.environ.get("TELEGRAM_BOT_TOKEN"), os.environ.get("TELEGRAM_CHAT_ID")
+    clean = lambda v: (v or "").strip().strip("\"'").strip()
+    token, chat = clean(os.environ.get("TELEGRAM_BOT_TOKEN")), clean(os.environ.get("TELEGRAM_CHAT_ID"))
     if token and chat:
         data = urllib.parse.urlencode({"chat_id": chat, "text": text, "disable_web_page_preview": "true"}).encode()
         try:
