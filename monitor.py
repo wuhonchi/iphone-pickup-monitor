@@ -150,6 +150,12 @@ def cron_run():
 
 def main():
     load_env()
+    if "--selftest" in sys.argv:
+        # Detect a model known to be in stock (2TB Burgundy at time of writing) and send a test Telegram.
+        t = {"MJY44ZA/A": ("2TB (SELF-TEST)", BUY.format("2tb"))}
+        found = scan(targets=t, queries=["MJXQ4ZA/A"])
+        msg = ("[TEST] " + fmt(found, t)) if found else "[TEST] monitor reachable, but 2TB stand-in not seen now"
+        sys.exit(0 if notify(msg) else 1)
     if "--cron" in sys.argv:
         cron_run()
         return

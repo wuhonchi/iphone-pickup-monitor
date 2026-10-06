@@ -4,6 +4,11 @@ name: iphone-pickup-monitor
 # The schedule below is only a slow fallback in case cron-job.org stops.
 on:
   workflow_dispatch:
+    inputs:
+      selftest:
+        description: "Send a test Telegram using an in-stock stand-in model"
+        type: boolean
+        default: false
   schedule:
     - cron: "*/30 * * * *"
 
@@ -25,7 +30,7 @@ jobs:
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-        run: python3 monitor.py --cron
+        run: python3 monitor.py ${{ inputs.selftest && '--selftest' || '--cron' }}
 
       - name: Save state
         if: always()
