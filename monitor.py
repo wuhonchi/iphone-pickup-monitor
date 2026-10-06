@@ -53,7 +53,13 @@ def notify(text):
         try:
             urllib.request.urlopen(f"https://api.telegram.org/bot{token}/sendMessage", data, timeout=15).read()
         except Exception as e:
-            print(f"telegram failed: {e}", flush=True)
+            detail = ""
+            if isinstance(e, urllib.error.HTTPError):
+                try:
+                    detail = json.loads(e.read()).get("description", "")
+                except Exception:
+                    pass
+            print(f"telegram failed: {e} {detail}", flush=True)
             ok = False
     else:
         print("(TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID not set; console + macOS only)", flush=True)
