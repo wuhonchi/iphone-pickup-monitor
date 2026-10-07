@@ -20,21 +20,22 @@ ROOT = Path(__file__).parent
 BASE = "https://www.apple.com/hk/shop/pickup-message-recommendations"
 LOCATION = "hong kong"
 # Same query params the store page itself sends on Add to Bag (full price, no AppleCare), minus the session token.
-BUY = ("https://www.apple.com/hk/shop/buy-iphone/iphone-18-pro/6.9-inch-display-{cap}-burgundy"
+BUY = ("https://www.apple.com/hk/shop/buy-iphone/iphone-18-pro/6.9-inch-display-{cap}-{color}"
        "?product={part}&purchaseOption=fullPrice&step=select&acpart=none")
 
 
-def buy_url(cap, part):
-    return BUY.format(cap=cap, part=part.replace("/", "%2F"))
+def buy_url(cap, part, color="burgundy"):
+    return BUY.format(cap=cap, color=color, part=part.replace("/", "%2F"))
 
-# iPhone 18 Pro Max Burgundy (part numbers from apple.com/hk iPhone 18 Pro page source)
+# iPhone 18 Pro Max (part numbers from apple.com/hk iPhone 18 Pro page source)
 TARGETS = {
-    "MJXQ4ZA/A": ("256GB", buy_url("256gb", "MJXQ4ZA/A")),
-    "MJXV4ZA/A": ("512GB", buy_url("512gb", "MJXV4ZA/A")),
-    "MJY04ZA/A": ("1TB", buy_url("1tb", "MJY04ZA/A")),
+    "MJXQ4ZA/A": ("256GB Burgundy", buy_url("256gb", "MJXQ4ZA/A")),
+    "MJXV4ZA/A": ("512GB Burgundy", buy_url("512gb", "MJXV4ZA/A")),
+    "MJY04ZA/A": ("1TB Burgundy", buy_url("1tb", "MJY04ZA/A")),
+    "MJXN4ZA/A": ("256GB Black", buy_url("256gb", "MJXN4ZA/A", "black")),
 }
 # Each query hides its own product, so query every target plus non-target Pro Max parts.
-QUERIES = list(TARGETS) + ["MJY44ZA/A", "MJXN4ZA/A"]  # 2TB Burgundy, 256GB Black
+QUERIES = list(TARGETS) + ["MJY44ZA/A", "MJXP4ZA/A"]  # 2TB Burgundy, 256GB Silver
 
 INTERVAL = int(os.environ.get("INTERVAL_SEC", "180"))
 GAP = 3  # seconds between the requests inside one cycle
@@ -115,7 +116,7 @@ def scan(targets=None, queries=None):
 
 def fmt(found, targets=None):
     targets = targets or TARGETS
-    lines = ["iPhone 18 Pro Max Burgundy 今日有得自取:"]
+    lines = ["iPhone 18 Pro Max 今日有得自取:"]
     for (part, store), (label, quote) in sorted(found.items()):
         lines.append(f"- {label} @ Apple {store} ({quote})\n  {targets[part][1]}")
     return "\n".join(lines)
