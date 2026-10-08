@@ -18,6 +18,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).parent
 BASE = "https://www.apple.com/hk/shop/pickup-message-recommendations"
+BAG_URL = "https://www.apple.com/hk/shop/bag"
 LOCATION = "hong kong"
 # Same query params the store page itself sends on Add to Bag (full price, no AppleCare), minus the session token.
 BUY = ("https://www.apple.com/hk/shop/buy-iphone/iphone-18-pro/6.9-inch-display-{cap}-{color}"
@@ -99,26 +100,36 @@ def fetch(product):
     return json.loads(body)
 
 
-def scan(targets=None, queries=None):
-    """Return {(part, store): (label, quote)} for targets seen available today."""
+def scan(targets=None, queries=None, on_hit=None):
+    """Return {(part, store): (label, quote)} for targets seen available today.
+
+    on_hit(hits) is called right after each query that saw targets, so alerts
+    need not wait for the remaining queries.
+    """
     targets, queries = targets or TARGETS, queries or QUERIES
     found = {}
     for i, product in enumerate(queries):
         if i:
             time.sleep(GAP)
         pm = fetch(product)["body"]["PickupMessage"]
+        hits = {}
         for store in pm.get("stores", []):
             for part, info in store.get("partsAvailability", {}).items():
                 if part in targets and info.get("pickupDisplay") == "available":
-                    found[(part, store["storeName"])] = (targets[part][0], info.get("pickupSearchQuote", ""))
+                    hits[(part, store["storeName"])] = (targets[part][0], info.get("pickupSearchQuote", ""))
+        found.update(hits)
+        if hits and on_hit:
+            on_hit(hits)
     return found
 
 
 def fmt(found, targets=None):
     targets = targets or TARGETS
-    lines = ["iPhone 18 Pro Max 今日有得自取:"]
+    hkt = time.strftime("%H:%M:%S", time.gmtime(time.time() + 8 * 3600))
+    lines = [f"iPhone 18 Pro Max 今日有得自取 (見到 {hkt} HKT，未留貨):"]
     for (part, store), (label, quote) in sorted(found.items()):
-        lines.append(f"- {label} @ Apple {store} ({quote})\n  {targets[part][1]}")
+        lines.append(f"- {label} @ Apple {store} ({quote})\n  商品頁: {targets[part][1]}")
+    lines.append(f"Bag: {BAG_URL}  -> Check out -> Pick up -> 揀返上面間舖")
     return "\n".join(lines)
 
 
@@ -148,16 +159,24 @@ def cron_run():
         prev = {tuple(x) for x in json.loads(STATE.read_text())}
     except Exception:
         prev = set()
+    alerted, failed = {}, set()
+
+    def on_hit(hits):  # alert as soon as one query sees something new
+        new_now = {k: v for k, v in hits.items() if k not in prev and k not in alerted}
+        if not new_now:
+            return
+        alerted.update(new_now)
+        if not notify(fmt(new_now)):
+            failed.update(new_now)  # Telegram failed: keep them "new" so the next run alerts again
+
     try:
-        found = scan()
+        found = scan(on_hit=on_hit)
     except Blocked as e:
         write_atomic(BLOCKED_FLAG, f"{time.strftime('%F %T')} {e}\n")
         notify(f"iPhone monitor paused: Apple no longer answering normally ({e}). Check manually; delete .blocked to resume.")
         return
-    new = {k: v for k, v in found.items() if k not in prev}
-    remember = set(found)
-    if new and not notify(fmt(new)):
-        remember -= set(new)  # Telegram failed: keep them "new" so the next run alerts again
+    new = alerted
+    remember = set(found) - failed
     write_atomic(STATE, json.dumps(sorted(remember)))
     print(f"{time.strftime('%F %T')} seen={len(found)} new={len(new)}", flush=True)
 
