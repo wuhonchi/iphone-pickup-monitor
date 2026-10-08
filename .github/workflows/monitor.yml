@@ -37,7 +37,7 @@ jobs:
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add -A .state.json .blocked 2>/dev/null || true
+          for f in .state.json .blocked; do [ -e "$f" ] && git add "$f"; done
           if git diff --cached --quiet; then echo "state unchanged"; exit 0; fi
           git commit -m "monitor state $(date -u +%FT%TZ)"
           git pull --rebase --quiet && git push
