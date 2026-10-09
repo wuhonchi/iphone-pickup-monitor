@@ -246,28 +246,32 @@ for name, resp in (("HTTP 500", (500, None)), ("no network", (None, None)), ("ma
 # M18 (4): --fallback
 monitor.GAP = 0
 NOW = T0_EPOCH + 600
-def fb(latest_age, rb, listing=None):
+def fb(latest_age, rb, listing=None, notify=None):
     calls = []; rbn = []
     setup(lambda q, timeout=20: (calls.append(q), EMPTY)[1], window=False,
-          remote_blocked=lambda: (rbn.append(1), rb)[1])
+          remote_blocked=lambda: (rbn.append(1), rb)[1], notify=notify)
     created = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(NOW - latest_age)) if latest_age is not None else None
     monitor._gh_api = fake_api({RUNS: listing or runs_of(*([(9, created)] if created else []))})
     out = io.StringIO()
     with contextlib.redirect_stdout(out):
         monitor.fallback_run(now=lambda: NOW)
     return len(calls), len(rbn), out.getvalue()
-n, nrb, log = fb(60, False)
-check("M18a dispatch 60s ago -> exit, no Apple request", n == 0 and nrb == 0 and "fallback not needed: dispatch active" in log, log.strip())
-n, nrb, log = fb(600, False)
-check("M18b last dispatch 600s ago -> exactly one pass (3 queries)", n == 3 and nrb == 1, f"queries={n} log={log.strip()!r}")
-n, nrb, log = fb(None, False)
-check("M18c no dispatch runs at all -> one pass", n == 3, f"queries={n}")
-n, _, log = fb(600, True)
-check("M18d shared .blocked -> skipped", n == 0 and "fallback skipped" in log, log.strip())
-n, _, log = fb(600, None)
-check("M18e block state unknown -> skipped", n == 0 and "fallback skipped: block state unknown" in log, log.strip())
-n, _, log = fb(None, False, listing=(None, None))
-check("M18f listing failed -> skipped (fail closed), logged", n == 0 and "dispatch state unknown" in log, log.strip())
+FB_SENT = []
+monitor_notify_real = monitor.notify
+def fb2(*a, **k):
+    FB_SENT.clear()
+    r = fb(*a, notify=lambda t: (FB_SENT.append(t), True)[1], **k)
+    return r + (list(FB_SENT),)
+n, nrb, log, sent = fb2(60, False)
+check("M18a dispatch 60s ago -> nothing (no Apple request, no alert)", n == 0 and not sent and "dispatch active" in log, log.strip())
+n, nrb, log, sent = fb2(600, False)
+check("M18b last dispatch 600s ago -> watchdog alert, NO Apple request", n == 0 and len(sent) == 1 and "cron-job.org" in sent[0], f"queries={n} sent={sent}")
+n, nrb, log, sent = fb2(None, False)
+check("M18c no dispatch runs at all -> watchdog alert, NO Apple request", n == 0 and len(sent) == 1, f"queries={n} sent={sent}")
+n, nrb, log, sent = fb2(600, True)
+check("M18d fallback never polls Apple even if block state is anything", n == 0 and nrb == 0, f"queries={n} rb_checks={nrb}")
+n, _, log, sent = fb2(None, False, listing=(None, None))
+check("M18f listing failed -> skipped (fail closed), no alert", n == 0 and not sent and "dispatch state unknown" in log, log.strip())
 os.environ.pop("GITHUB_RUN_ID")
 
 failed = [n for n, ok in results if not ok]

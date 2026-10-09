@@ -503,8 +503,8 @@ FALLBACK_QUIET = 180  # seconds: a dispatch run this recent means the minute own
 
 
 def fallback_run(now=time.time):
-    """Schedule fallback: one cron_run pass, only when no minute-owner dispatch is active and the
-    shared .blocked is confirmed absent."""
+    """Schedule watchdog: never polls Apple (so it cannot overlap the minute owners, review round 13).
+    If no minute-owner dispatch was created recently, tell the user cron-job.org seems stopped."""
     status, body = _gh_api(WORKFLOW_RUNS.replace("per_page=20", "per_page=1"))
     try:
         runs = body["workflow_runs"] if status == 200 else None
@@ -517,11 +517,9 @@ def fallback_run(now=time.time):
     if latest is not None and now() - latest < FALLBACK_QUIET:
         print(f"{time.strftime('%F %T')} fallback not needed: dispatch active", flush=True)
         return
-    rb = remote_blocked()
-    if rb is not False:
-        print(f"{time.strftime('%F %T')} fallback skipped: {'shared .blocked' if rb else 'block state unknown'}", flush=True)
-        return
-    cron_run()
+    ago = f"{int((now() - latest) // 60)} 分鐘前" if latest is not None else "搵唔到紀錄"
+    print(f"{time.strftime('%F %T')} watchdog: no recent dispatch (last {ago})", flush=True)
+    notify(f"iPhone monitor: 最近冇收到 cron-job.org 觸發（最後一次：{ago}），而家冇查緊 Apple。請檢查 cron-job.org 個 job。")
 
 
 def main():
