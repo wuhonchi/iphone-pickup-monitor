@@ -13,7 +13,7 @@ It does not retry around blocks.
   python3 monitor.py --once     # one cycle, print result
   python3 monitor.py --cron     # one cycle with saved state (for crontab)
 """
-import fcntl, json, os, random, subprocess, sys, time, urllib.error, urllib.parse, urllib.request
+import concurrent.futures, fcntl, json, os, random, subprocess, sys, time, urllib.error, urllib.parse, urllib.request
 from pathlib import Path
 
 ROOT = Path(__file__).parent
@@ -39,7 +39,12 @@ TARGETS = {
 QUERIES = list(TARGETS) + ["MJY44ZA/A", "MJXP4ZA/A"]  # 2TB Burgundy, 256GB Silver
 
 INTERVAL = int(os.environ.get("INTERVAL_SEC", "180"))
-GAP = 3  # seconds between the requests inside one cycle
+GAP = 3  # seconds between the requests inside one cycle (sequential mode)
+# Burst mode: inside one cron minute, poll every BURST_EVERY s for BURST_FOR s, queries in parallel.
+# Only during BURST_WINDOW (HKT) -- stock was seen only 07:27-08:46 HKT on 10/08-10/09 (state commits / run logs).
+BURST_WINDOW = os.environ.get("BURST_WINDOW", "07:00-09:30")
+BURST_EVERY = int(os.environ.get("BURST_EVERY", "5"))
+BURST_FOR = int(os.environ.get("BURST_FOR", "52"))
 
 
 def load_env():
@@ -100,6 +105,36 @@ def fetch(product):
     return json.loads(body)
 
 
+def _hits(pm, targets):
+    hits = {}
+    for store in pm.get("stores", []):
+        for part, info in store.get("partsAvailability", {}).items():
+            if part in targets and info.get("pickupDisplay") == "available":
+                hits[(part, store["storeName"])] = (targets[part][0], info.get("pickupSearchQuote", ""), store.get("storeNumber", ""))
+    return hits
+
+
+def scan_parallel(targets=None, queries=None, on_hit=None):
+    """Same result as scan(), but all queries at once (no GAP)."""
+    targets, queries = targets or TARGETS, queries or QUERIES
+    found = {}
+    with concurrent.futures.ThreadPoolExecutor(max_workers=len(queries)) as ex:
+        futs = [ex.submit(fetch, q) for q in queries]
+        for f in concurrent.futures.as_completed(futs):
+            hits = _hits(f.result()["body"]["PickupMessage"], targets)
+            found.update(hits)
+            if hits and on_hit:
+                on_hit(hits)
+    return found
+
+
+def in_burst_window(now=None):
+    hkt = time.gmtime((now or time.time()) + 8 * 3600)
+    hm = f"{hkt.tm_hour:02d}:{hkt.tm_min:02d}"
+    start, end = BURST_WINDOW.split("-")
+    return start <= hm < end
+
+
 def scan(targets=None, queries=None, on_hit=None):
     """Return {(part, store): (label, quote)} for targets seen available today.
 
@@ -111,12 +146,7 @@ def scan(targets=None, queries=None, on_hit=None):
     for i, product in enumerate(queries):
         if i:
             time.sleep(GAP)
-        pm = fetch(product)["body"]["PickupMessage"]
-        hits = {}
-        for store in pm.get("stores", []):
-            for part, info in store.get("partsAvailability", {}).items():
-                if part in targets and info.get("pickupDisplay") == "available":
-                    hits[(part, store["storeName"])] = (targets[part][0], info.get("pickupSearchQuote", ""), store.get("storeNumber", ""))
+        hits = _hits(fetch(product)["body"]["PickupMessage"], targets)
         found.update(hits)
         if hits and on_hit:
             on_hit(hits)
@@ -161,26 +191,36 @@ def cron_run():
         prev = {tuple(x) for x in json.loads(STATE.read_text())}
     except Exception:
         prev = set()
-    alerted, failed = {}, set()
 
-    def on_hit(hits):  # alert as soon as one query sees something new
-        new_now = {k: v for k, v in hits.items() if k not in prev and k not in alerted}
-        if not new_now:
+    burst = in_burst_window()
+    deadline = time.time() + (BURST_FOR if burst else 0)
+    passes = 0
+    while True:
+        alerted, failed = {}, set()
+
+        def on_hit(hits):  # alert as soon as one query sees something new
+            new_now = {k: v for k, v in hits.items() if k not in prev and k not in alerted}
+            if not new_now:
+                return
+            alerted.update(new_now)
+            if not notify(fmt(new_now)):
+                failed.update(new_now)  # Telegram failed: keep them "new" so the next pass alerts again
+
+        try:
+            found = (scan_parallel if burst else scan)(on_hit=on_hit)
+        except Blocked as e:
+            write_atomic(BLOCKED_FLAG, f"{time.strftime('%F %T')} {e}\n")
+            notify(f"iPhone monitor paused: Apple no longer answering normally ({e}). Check manually; delete .blocked to resume.")
             return
-        alerted.update(new_now)
-        if not notify(fmt(new_now)):
-            failed.update(new_now)  # Telegram failed: keep them "new" so the next run alerts again
-
-    try:
-        found = scan(on_hit=on_hit)
-    except Blocked as e:
-        write_atomic(BLOCKED_FLAG, f"{time.strftime('%F %T')} {e}\n")
-        notify(f"iPhone monitor paused: Apple no longer answering normally ({e}). Check manually; delete .blocked to resume.")
-        return
-    new = alerted
-    remember = set(found) - failed
-    write_atomic(STATE, json.dumps(sorted(remember)))
-    print(f"{time.strftime('%F %T')} seen={len(found)} new={len(new)}", flush=True)
+        passes += 1
+        prev = set(found) - failed  # an item that disappears and comes back alerts again
+        write_atomic(STATE, json.dumps(sorted(prev)))
+        print(f"{time.strftime('%F %T')} pass={passes} burst={burst} seen={len(found)} new={len(alerted)}", flush=True)
+        # Next pass on the next BURST_EVERY-second boundary (…:00, :05, :10 …) while time remains.
+        nxt = (int(time.time()) // BURST_EVERY + 1) * BURST_EVERY
+        if not burst or nxt >= deadline:
+            return
+        time.sleep(max(0, nxt - time.time()))
 
 
 def main():
