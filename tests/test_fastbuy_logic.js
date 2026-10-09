@@ -164,9 +164,9 @@ test("checkout/start landing outcomes", () => {
 
 // ---- v0.13/v0.14 safety ----
 
-test("FAST_CHECKOUT is off by default and @version is 0.21", () => {
+test("FAST_CHECKOUT is off by default and @version is 0.22", () => {
   assert.match(SRC, /^const FAST_CHECKOUT = false;/m);
-  assert.match(SRC, /^\/\/ @version\s+0\.21$/m);
+  assert.match(SRC, /^\/\/ @version\s+0\.22$/m);
 });
 
 test("owner id: random, and guarded writes need the stored owner to match", () => {
@@ -547,28 +547,64 @@ test("attach navigation re-checks ownership after the state write (review round 
   assert.ok(/await next\(r\.st\.stage, r\.st\);[\s\S]*await navOwned\(r\.go\.url, verifyAttach\)/.test(step2));
   assert.ok(!/location\.href\s*=/.test(step2));
 });
-test("newest alert link takes over (user report 2026-10-10: second tab stuck on 'busy')", () => {
+test("newest alert link takes over; added-but-unsettled flows stop for a bag check (user report 2026-10-10, review round 18)", () => {
   const now = 1e12, TTL = 5 * 60 * 1000;
-  const P = "MJXV4ZA/A", Q = "MJXX4ZA/A";
+  const P = "MJXV4ZA/A", Q = "MJXX4ZA/A", N = "iPhone 18 Pro Max 512GB Burgundy";
   const old = (extra) => ({ ts: now - 5000, owner: "old", armedPart: P, stage: "product", ...extra });
-  // same model, old flow not yet at Add to Bag -> fresh flow on the product page
+  const added = (extra) => old({ stage: "attach", atb1: "ui", name: N, part: P, ...extra });
+  // nothing added yet -> fresh flow (same or other model)
   assert.strictEqual(L.armDecision("R499", old(), now, TTL, P).kind, "arm");
-  // same model, old flow already clicked Add to Bag -> resume at the bag with its name/part (no second add)
-  const r = L.armDecision("R499", old({ stage: "attach", atb1: "ui", name: "iPhone 18 Pro Max 512GB Burgundy", part: P }), now, TTL, P);
-  assert.deepStrictEqual(r, { kind: "resume", name: "iPhone 18 Pro Max 512GB Burgundy", part: P });
-  // resume needs a usable name and matching part, else fresh
-  assert.strictEqual(L.armDecision("R499", old({ atb1: "ui", part: P }), now, TTL, P).kind, "arm");
-  assert.strictEqual(L.armDecision("R499", old({ atb1: "ui", name: "x", part: Q }), now, TTL, P).kind, "arm");
-  // different model: takeover only while the old flow has not added anything
   assert.strictEqual(L.armDecision("R499", old(), now, TTL, Q).kind, "arm");
-  assert.strictEqual(L.armDecision("R499", old({ atb1: "ui", name: "x", part: P }), now, TTL, Q).kind, "busy");
-  // expired old flow never blocks
-  assert.strictEqual(L.armDecision("R499", old({ ts: now - TTL - 1, atb1: "ui", name: "x", part: P }), now, TTL, Q).kind, "arm");
-  // the old tab loses ownership as soon as the new owner is stored
+  assert.strictEqual(L.armDecision("R499", null, now, TTL, P).kind, "arm");
+  // bag check passed, same model, active -> resume at the bag
+  assert.deepStrictEqual(L.armDecision("R499", added({ stage: "checkout", bagChecked: true }), now, TTL, P), { kind: "resume", name: N, part: P });
+  // 2nd unit GET pending (atbPending 2) or any pre-bag-check stage -> checkBag, never setQty/checkout
+  assert.strictEqual(L.armDecision("R499", added({ atbPending: 2, extraAtb: true }), now, TTL, P).kind, "checkBag");
+  assert.strictEqual(L.armDecision("R499", added({ stage: "bag", atbPending: 0 }), now, TTL, P).kind, "checkBag");
+  assert.strictEqual(L.armDecision("R499", added({ stage: "attach", atbPending: 1 }), now, TTL, P).kind, "checkBag"); // C4 window
+  // other model already added (active or expired) -> checkBag, never a fresh add that mixes models
+  assert.strictEqual(L.armDecision("R499", added({ stage: "checkout", bagChecked: true }), now, TTL, Q).kind, "checkBag");
+  assert.strictEqual(L.armDecision("R499", added({ ts: now - TTL - 1 }), now, TTL, Q).kind, "checkBag");
+  // expired same model, even after bag check -> checkBag (bag may hold units)
+  assert.strictEqual(L.armDecision("R499", added({ ts: now - TTL - 1, stage: "checkout", bagChecked: true }), now, TTL, P).kind, "checkBag");
+  // added but metadata missing -> checkBag, never fresh-add
+  assert.strictEqual(L.armDecision("R499", old({ atb1: "ui", stage: "checkout", bagChecked: true }), now, TTL, P).kind, "checkBag");
+  assert.strictEqual(L.armDecision("R499", added({ part: Q, stage: "checkout", bagChecked: true }), now, TTL, P).kind, "checkBag");
+  // the old tab loses ownership once the new owner is stored or the state is deleted
   assert.strictEqual(L.ownerMatches({ owner: "new" }, "old"), false);
-  // wiring: resume state goes to the bag via navOwned; the bag step accepts stage "bag"
+  assert.strictEqual(L.ownerMatches(null, "old"), false);
+  // wiring
   assert.ok(SRC.includes('stage: "bag", name: d.name, part: d.part, atb1: "ui", resumed: true'));
   assert.ok(/if \(st\.stage === "bag" && st\.resumed && !path\.endsWith\("\/shop\/bag"\)\) \{[\s\S]{0,120}await navOwned\("\/hk\/shop\/bag"\)/.test(SRC));
   assert.ok(SRC.includes('(st.stage === "attach" || st.stage === "bag") && path.endsWith("/shop/bag")'));
 });
-Promise.all(pending).then(() => console.log(passed + " tests passed"));
+
+test("arming block (real source, fake GM): checkBag deletes the old state and adds nothing; resume stores a bag-stage flow", async () => {
+  const startIdx = SRC.indexOf("  if (armHash) {");
+  let depth = 0, i = SRC.indexOf("{", startIdx);
+  for (; i < SRC.length; i++) { if (SRC[i] === "{") depth++; else if (SRC[i] === "}" && --depth === 0) break; }
+  const block = SRC.slice(startIdx, i + 1);
+  const run = async (existing, search) => {
+    let store = existing ? JSON.stringify(existing) : null;
+    const GM = { getValue: async () => store, setValue: async (k, v) => { store = v; }, deleteValue: async () => { store = null; } };
+    const win = { name: "" };
+    let msg = null;
+    const load = async () => JSON.parse(store || "null");
+    const fn = new Function("L", "GM", "window", "armHash", "armSearch", "hasGM", "load", "clearTab", "banner", "KEY", "TTL_MS",
+      "return (async () => {" + block + "\nreturn 'continued'; })();");
+    const out = await fn(L, GM, win, "R499", search, true, load, () => { win.name = ""; }, (m) => { msg = m; return "banner"; }, "fastbuy", 5 * 60 * 1000);
+    return { out, state: JSON.parse(store || "null"), msg, win };
+  };
+  const now = Date.now();
+  const N = "iPhone 18 Pro Max 512GB Burgundy";
+  // pending 2nd add -> state deleted, no new flow, user told to check the bag
+  let r = await run({ ts: now - 3000, owner: "old", armedPart: "MJXV4ZA/A", stage: "attach", atb1: "ui", atbPending: 2, name: N, part: "MJXV4ZA/A" }, "?product=MJXV4ZA%2FA");
+  assert.strictEqual(r.out, "banner"); assert.strictEqual(r.state, null); assert.match(r.msg, /Bag/); assert.strictEqual(r.win.name, "");
+  // settled -> new owner, stage bag, resumed, no bagChecked carried over, tab bound
+  r = await run({ ts: now - 3000, owner: "old", armedPart: "MJXV4ZA/A", stage: "checkout", bagChecked: true, atb1: "ui", name: N, part: "MJXV4ZA/A" }, "?product=MJXV4ZA%2FA");
+  assert.strictEqual(r.out, "continued"); assert.strictEqual(r.state.stage, "bag"); assert.strictEqual(r.state.resumed, true);
+  assert.notStrictEqual(r.state.owner, "old"); assert.strictEqual(r.state.bagChecked, undefined); assert.strictEqual(r.win.name, L.tabName(r.state.owner));
+  // nothing added -> fresh product flow with a new owner
+  r = await run({ ts: now - 3000, owner: "old", armedPart: "MJXV4ZA/A", stage: "product" }, "?product=MJXX4ZA%2FA");
+  assert.strictEqual(r.state.stage, "product"); assert.strictEqual(r.state.armedPart, "MJXX4ZA/A"); assert.notStrictEqual(r.state.owner, "old");
+});Promise.all(pending).then(() => console.log(passed + " tests passed"));
