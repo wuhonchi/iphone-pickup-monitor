@@ -164,9 +164,9 @@ test("checkout/start landing outcomes", () => {
 
 // ---- v0.13/v0.14 safety ----
 
-test("FAST_CHECKOUT is off by default and @version is 0.20", () => {
+test("FAST_CHECKOUT is off by default and @version is 0.21", () => {
   assert.match(SRC, /^const FAST_CHECKOUT = false;/m);
-  assert.match(SRC, /^\/\/ @version\s+0\.20$/m);
+  assert.match(SRC, /^\/\/ @version\s+0\.21$/m);
 });
 
 test("owner id: random, and guarded writes need the stored owner to match", () => {
@@ -236,8 +236,7 @@ test("armDecision: single active flow, reset, product required", () => {
   const active = { owner: "x", ts: now - 1000 };
   const expired = { owner: "x", ts: now - TTL - 1 };
   assert.strictEqual(L.armDecision("R673", null, now, TTL, "MJXV4ZA/A").kind, "arm");
-  assert.strictEqual(L.armDecision("R673", active, now, TTL, "MJXV4ZA/A").kind, "busy"); // never overwrite
-  assert.strictEqual(L.armDecision("R673", { ts: now - 1000 }, now, TTL, "MJXV4ZA/A").kind, "busy"); // ownerless but active
+  assert.strictEqual(L.armDecision("R673", { ts: now - 1000 }, now, TTL, "MJXV4ZA/A").kind, "arm"); // ownerless legacy: overwrite
   assert.strictEqual(L.armDecision("R673", expired, now, TTL, "MJXV4ZA/A").kind, "arm");
   assert.strictEqual(L.armDecision("R673", null, now, TTL, null).kind, "noPart");
   assert.strictEqual(L.armDecision("reset", active, now, TTL, null).kind, "reset");
@@ -547,5 +546,29 @@ test("attach navigation re-checks ownership after the state write (review round 
   const step2 = SRC.slice(SRC.indexOf("// 2. Accessory upsell page"), SRC.indexOf("// 2b."));
   assert.ok(/await next\(r\.st\.stage, r\.st\);[\s\S]*await navOwned\(r\.go\.url, verifyAttach\)/.test(step2));
   assert.ok(!/location\.href\s*=/.test(step2));
+});
+test("newest alert link takes over (user report 2026-10-10: second tab stuck on 'busy')", () => {
+  const now = 1e12, TTL = 5 * 60 * 1000;
+  const P = "MJXV4ZA/A", Q = "MJXX4ZA/A";
+  const old = (extra) => ({ ts: now - 5000, owner: "old", armedPart: P, stage: "product", ...extra });
+  // same model, old flow not yet at Add to Bag -> fresh flow on the product page
+  assert.strictEqual(L.armDecision("R499", old(), now, TTL, P).kind, "arm");
+  // same model, old flow already clicked Add to Bag -> resume at the bag with its name/part (no second add)
+  const r = L.armDecision("R499", old({ stage: "attach", atb1: "ui", name: "iPhone 18 Pro Max 512GB Burgundy", part: P }), now, TTL, P);
+  assert.deepStrictEqual(r, { kind: "resume", name: "iPhone 18 Pro Max 512GB Burgundy", part: P });
+  // resume needs a usable name and matching part, else fresh
+  assert.strictEqual(L.armDecision("R499", old({ atb1: "ui", part: P }), now, TTL, P).kind, "arm");
+  assert.strictEqual(L.armDecision("R499", old({ atb1: "ui", name: "x", part: Q }), now, TTL, P).kind, "arm");
+  // different model: takeover only while the old flow has not added anything
+  assert.strictEqual(L.armDecision("R499", old(), now, TTL, Q).kind, "arm");
+  assert.strictEqual(L.armDecision("R499", old({ atb1: "ui", name: "x", part: P }), now, TTL, Q).kind, "busy");
+  // expired old flow never blocks
+  assert.strictEqual(L.armDecision("R499", old({ ts: now - TTL - 1, atb1: "ui", name: "x", part: P }), now, TTL, Q).kind, "arm");
+  // the old tab loses ownership as soon as the new owner is stored
+  assert.strictEqual(L.ownerMatches({ owner: "new" }, "old"), false);
+  // wiring: resume state goes to the bag via navOwned; the bag step accepts stage "bag"
+  assert.ok(SRC.includes('stage: "bag", name: d.name, part: d.part, atb1: "ui", resumed: true'));
+  assert.ok(/if \(st\.stage === "bag" && st\.resumed && !path\.endsWith\("\/shop\/bag"\)\) \{[\s\S]{0,120}await navOwned\("\/hk\/shop\/bag"\)/.test(SRC));
+  assert.ok(SRC.includes('(st.stage === "attach" || st.stage === "bag") && path.endsWith("/shop/bag")'));
 });
 Promise.all(pending).then(() => console.log(passed + " tests passed"));
