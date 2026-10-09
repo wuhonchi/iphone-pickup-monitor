@@ -155,16 +155,41 @@ def scan(targets=None, queries=None, on_hit=None):
     return found
 
 
+def item_link(part, rest, targets):
+    num = rest[0] if rest else ""
+    return targets[part][1] + (f"#fastbuy={num}" if num else "")
+
+
 def fmt(found, targets=None):
     targets = targets or TARGETS
     hkt = time.strftime("%H:%M:%S", time.gmtime(time.time() + 8 * 3600))
     lines = [f"iPhone 18 Pro Max 今日有得自取 (見到 {hkt} HKT，未留貨):"]
     for (part, store), (label, quote, *rest) in sorted(found.items()):
-        num = rest[0] if rest else ""
-        link = targets[part][1] + (f"#fastbuy={num}" if num else "")
+        link = item_link(part, rest, targets)
         lines.append(f"- {label} @ Apple {store} ({quote})\n  {link}")
     lines.append(f"Bag: {BAG_URL}  -> Check out -> Pick up -> 揀返上面間舖")
     return "\n".join(lines)
+
+
+def push_open(found, targets=None):
+    """POST the first #fastbuy link to ntfy (Mac auto-opens it). Background thread, 2 s timeout, never raises."""
+    topic = (os.environ.get("NTFY_TOPIC") or "").strip()
+    targets = targets or TARGETS
+    links = [(item_link(part, rest, targets), f"{label} @ {store}")
+             for (part, store), (label, quote, *rest) in sorted(found.items()) if rest and rest[0]]
+    if not (topic and links):
+        return
+    url, title = links[0]
+
+    def send():
+        req = urllib.request.Request(f"https://ntfy.sh/{topic}", url.encode(),
+                                     headers={"Title": title.encode("ascii", "replace").decode()})
+        try:
+            urllib.request.urlopen(req, timeout=2).read()
+        except Exception as e:
+            print(f"ntfy failed: {e}", flush=True)
+
+    threading.Thread(target=send).start()  # non-daemon: a short-lived run still finishes the POST
 
 
 STATE = ROOT / ".state.json"
@@ -205,6 +230,7 @@ def cron_run():
             if not new_now:
                 return
             alerted.update(new_now)
+            push_open(new_now)
             if not notify(fmt(new_now)):
                 failed.update(new_now)  # Telegram failed: keep them "new" so the next pass alerts again
 
@@ -355,6 +381,7 @@ def minute_run(owned_start=None, ticks_per_min=60 // TICK, now=time.time, sleep=
             if not errors:  # only a complete scan may mark items as gone
                 last_seen["found"] = found
         if new:
+            push_open(new)
             notifier.put(set(new), fmt(new))
         hms = time.strftime("%H:%M:%S", time.gmtime(t))
         print(f"tick {hms} start+{t0 - t:.2f}s took={now() - t0:.2f}s seen={len(found)} new={len(new)} errors={len(errors)}", flush=True)

@@ -33,6 +33,7 @@ jobs:
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}
           GITHUB_TOKEN: ${{ github.token }}
           BURST_WINDOW: ${{ inputs.burst_window || vars.BURST_WINDOW || '07:00-09:30' }}
         run: python3 monitor.py ${{ inputs.selftest && '--selftest' || (github.event_name == 'workflow_dispatch' && '--minute' || '--cron') }}
