@@ -3,7 +3,9 @@
 "use strict";
 const assert = require("assert");
 const path = require("path");
+const fs = require("fs");
 const L = require(path.join(__dirname, "..", "fastbuy.user.js"));
+const SRC = fs.readFileSync(path.join(__dirname, "..", "fastbuy.user.js"), "utf8");
 
 let passed = 0;
 function test(name, fn) {
@@ -12,6 +14,7 @@ function test(name, fn) {
   console.log("ok -", name);
 }
 
+const m = (hhmm) => Number(hhmm.slice(0, 2)) * 60 + Number(hhmm.slice(3));
 const T1 = "0123456789abcdef0123456789abcdef01234567"; // 40 hex
 const T2 = "fedcba9876543210fedcba9876543210fedcba98";
 const PATH = "/hk/shop/buy-iphone/iphone-18-pro/6.9-inch-display-2tb-burgundy";
@@ -77,72 +80,69 @@ test("pltn / checkoutStartUrl match R7/R8 shape", () => {
   assert.strictEqual(L.checkoutStartUrl("bad", 2), null);
 });
 
-// State flow: product (fast add 1) -> attach -> fast add 2 -> attach -> checkout/start.
-const afterFastAdd1 = { stage: "attach", store: "R673", ts: 1, name: "iPhone X", part: "MJY44ZA/A", productPath: PATH, origin: ORIGIN, atbDone: 0, atbPending: 1, atb1: "fast", fastAtb: true };
+// State flow (v0.14): product (UI add 1) -> attach -> fast add 2 by GET -> attach -> bag.
+const ARMED = "MJY44ZA/A";
+const afterUiAdd1 = { stage: "attach", store: "R673", ts: 1, owner: "o1", armedPart: ARMED, name: "iPhone X", part: ARMED, productPath: PATH, origin: ORIGIN, atbDone: 0, atbPending: 1, atb1: "ui" };
+const att = (o) => ({ qty: 2, fastCheckout: false, attachPart: "mjy44za/a", ...o });
 
-test("1st attach landing -> 2nd add by GET with the rotated token, only once", () => {
-  const r = L.onAttach(afterFastAdd1, { token: T2, qty: 2, fastCheckout: true });
+test("1st attach landing after UI add -> 2nd add by GET with the rotated token, only once", () => {
+  const r = L.onAttach(afterUiAdd1, att({ token: T2 }));
   assert.strictEqual(r.go.kind, "atb");
   assert.strictEqual(new URL(r.go.url).searchParams.get("atbtoken"), T2);
+  assert.strictEqual(new URL(r.go.url).searchParams.get("product"), ARMED);
   assert.strictEqual(r.st.atbDone, 1);
   assert.strictEqual(r.st.atbPending, 2);
   assert.strictEqual(r.st.extraAtb, true);
   assert.strictEqual(r.st.stage, "attach");
   // Even if somehow back on attach with count still 1, no third GET add.
-  const again = L.onAttach({ ...r.st, atbPending: 0, atbDone: 1 }, { token: T1, qty: 2, fastCheckout: true });
+  const again = L.onAttach({ ...r.st, atbPending: 0, atbDone: 1 }, att({ token: T1 }));
   assert.strictEqual(again.go.kind, "bag");
 });
 
-test("2nd attach landing -> checkout/start with 2 units", () => {
-  const s1 = L.onAttach(afterFastAdd1, { token: T2, qty: 2, fastCheckout: true }).st;
-  const r = L.onAttach(s1, { token: T1, qty: 2, fastCheckout: true });
-  assert.strictEqual(r.st.atbDone, 2);
-  assert.strictEqual(r.go.kind, "checkoutStart");
-  assert.strictEqual(r.st.stage, "checkoutStart");
-  assert.ok(r.go.url.endsWith("pltn=5DAC20B5||;MJY44;MJY44|"));
+test("2nd attach landing -> bag (bag check always runs; checkout/start unreachable since 1st add is UI)", () => {
+  const s1 = L.onAttach(afterUiAdd1, att({ token: T2 })).st;
+  for (const fastCheckout of [false, true]) {
+    const r = L.onAttach(s1, att({ token: T1, fastCheckout }));
+    assert.strictEqual(r.st.atbDone, 2);
+    assert.strictEqual(r.go.kind, "bag");
+    assert.strictEqual(r.st.stage, "bag");
+  }
 });
 
-test("2nd attach landing with FAST_CHECKOUT=false -> bag", () => {
-  const s1 = L.onAttach(afterFastAdd1, { token: T2, qty: 2, fastCheckout: true }).st;
-  const r = L.onAttach(s1, { token: T1, qty: 2, fastCheckout: false });
-  assert.strictEqual(r.go.kind, "bag");
-  assert.strictEqual(r.st.stage, "bag");
+test("2nd unit GET refused unless the 1st add (same armed product) went through the UI", () => {
+  // no token -> bag dropdown
+  assert.strictEqual(L.onAttach(afterUiAdd1, att({ token: null })).go.kind, "bag");
+  // 1st add not via UI (legacy fast state / unknown) -> no GET
+  assert.strictEqual(L.onAttach({ ...afterUiAdd1, atb1: "fast" }, att({ token: T2 })).go.kind, "bag");
+  assert.strictEqual(L.onAttach({ ...afterUiAdd1, atb1: undefined }, att({ token: T2 })).go.kind, "bag");
+  // attach page shows another product, or none -> no GET
+  assert.strictEqual(L.onAttach(afterUiAdd1, att({ token: T2, attachPart: "MJY04ZA/A" })).go.kind, "bag");
+  assert.strictEqual(L.onAttach(afterUiAdd1, att({ token: T2, attachPart: null })).go.kind, "bag");
+  // stored part differs from the armed one -> no GET
+  assert.strictEqual(L.onAttach({ ...afterUiAdd1, part: "MJY04ZA/A" }, att({ token: T2 })).go.kind, "bag");
+  // arriving with 2 already pending (2nd add landed) -> no further GET
+  assert.strictEqual(L.onAttach({ ...afterUiAdd1, atbPending: 2 }, att({ token: T2 })).go.kind, "bag");
 });
 
-test("1st attach landing without token -> bag (dropdown fallback)", () => {
-  const r = L.onAttach(afterFastAdd1, { token: null, qty: 2, fastCheckout: true });
-  assert.strictEqual(r.go.kind, "bag");
-  assert.strictEqual(r.st.atbDone, 1);
+test("first unit never uses the direct GET (source: product-page step has no GET add)", () => {
+  const step1 = SRC.slice(SRC.indexOf("// 1. Product page"), SRC.indexOf("// 2. Accessory upsell page"));
+  assert.ok(step1.length > 200, "product step block found");
+  assert.ok(!/atbUrl|atbToken|location\.href/.test(step1), "no GET add / navigation in the product step");
+  assert.ok(/atb1: "ui"/.test(step1));
+  assert.ok(/click\(atb\)/.test(step1), "clicks Add to Bag");
+  assert.ok(/e && !e\.disabled \? e : null/.test(step1), "waits for an enabled Add to Bag");
+  // the only GET-add builder call sits in onAttach (2nd unit)
+  assert.strictEqual(SRC.split("atbUrl(").length - 1, 2); // definition + onAttach
 });
 
-test("UI first add: 2nd add still by GET, but no checkout/start (bag check must run)", () => {
-  const ui = { ...afterFastAdd1, atb1: "ui" };
-  const s1 = L.onAttach(ui, { token: T2, qty: 2, fastCheckout: true });
-  assert.strictEqual(s1.go.kind, "atb");
-  const r = L.onAttach(s1.st, { token: T1, qty: 2, fastCheckout: true });
-  assert.strictEqual(r.go.kind, "bag");
-});
-
-test("checkout/start not retried after it failed", () => {
-  const s1 = L.onAttach(afterFastAdd1, { token: T2, qty: 2, fastCheckout: true }).st;
-  const r = L.onAttach({ ...s1, fastCheckoutFailed: true }, { token: T1, qty: 2, fastCheckout: true });
-  assert.strictEqual(r.go.kind, "bag");
-});
-
-test("fast add 1 lands back on product page -> UI path; UI failing again -> stop", () => {
-  const r = L.onProductWhileAdding(afterFastAdd1);
-  assert.strictEqual(r.go.kind, "ui");
-  assert.strictEqual(r.st.stage, "product");
-  assert.strictEqual(r.st.fastAtbFailed, true);
-  const r2 = L.onProductWhileAdding({ ...afterFastAdd1, atb1: "ui" });
-  assert.strictEqual(r2.go.kind, "stop");
-});
-
-test("fast add 2 lands back on product page -> bag dropdown", () => {
-  const s1 = L.onAttach(afterFastAdd1, { token: T2, qty: 2, fastCheckout: true }).st;
-  const r = L.onProductWhileAdding(s1);
-  assert.strictEqual(r.go.kind, "bag");
-  assert.strictEqual(r.st.stage, "bag");
+test("UI add 1 lands back on product page -> stop; fast add 2 lands back -> bag dropdown", () => {
+  const r = L.onProductWhileAdding(afterUiAdd1);
+  assert.strictEqual(r.go.kind, "stop");
+  assert.strictEqual(L.onProductWhileAdding({ ...afterUiAdd1, atb1: "fast" }).go.kind, "stop");
+  const s1 = L.onAttach(afterUiAdd1, att({ token: T2 })).st;
+  const r2 = L.onProductWhileAdding(s1);
+  assert.strictEqual(r2.go.kind, "bag");
+  assert.strictEqual(r2.st.stage, "bag");
 });
 
 test("checkout/start landing outcomes", () => {
@@ -160,13 +160,11 @@ test("checkout/start landing outcomes", () => {
   assert.strictEqual(k("/hk/shop/404").go.kind, "bag");
 });
 
-// ---- v0.13 safety ----
-const fs = require("fs");
-const SRC = fs.readFileSync(path.join(__dirname, "..", "fastbuy.user.js"), "utf8");
+// ---- v0.13/v0.14 safety ----
 
-test("FAST_CHECKOUT is off by default and @version is 0.13", () => {
+test("FAST_CHECKOUT is off by default and @version is 0.14", () => {
   assert.match(SRC, /^const FAST_CHECKOUT = false;/m);
-  assert.match(SRC, /^\/\/ @version\s+0\.13$/m);
+  assert.match(SRC, /^\/\/ @version\s+0\.15$/m);
 });
 
 test("owner id: random, and guarded writes need the stored owner to match", () => {
@@ -179,6 +177,48 @@ test("owner id: random, and guarded writes need the stored owner to match", () =
   assert.strictEqual(L.ownerMatches({}, a), false); // legacy state without owner
   assert.strictEqual(L.ownerMatches({ owner: undefined }, undefined), false);
   assert.strictEqual(L.ownerMatches({ owner: "" }, ""), false);
+});
+
+test("per-tab ownership: only the tab whose window.name carries the stored owner acts", () => {
+  const TTL = 5 * 60 * 1000, now = 1_000_000;
+  const st = { owner: "abc-123", armedPart: "MJXV4ZA/A", ts: now - 1000, stage: "bag" };
+  const mine = L.tabName("abc-123");
+  assert.strictEqual(mine, "fastbuy-owner:abc-123");
+  assert.strictEqual(L.tabOwner(mine), "abc-123");
+  // matching window.name -> act
+  assert.strictEqual(L.tabDecision(st, mine, now, TTL).kind, "act");
+  // another tab: unmarked, other owner, unrelated name, bare prefix -> ignore (state is active -> grey note)
+  for (const name of ["", undefined, null, L.tabName("other"), "someSiteName", "fastbuy-owner:"]) {
+    const d = L.tabDecision(st, name, now, TTL);
+    assert.strictEqual(d.kind, "otherTab", String(name));
+    assert.strictEqual(d.active, true);
+  }
+  // no state -> ignore
+  assert.strictEqual(L.tabDecision(null, mine, now, TTL).kind, "none");
+  assert.strictEqual(L.tabDecision(null, "", now, TTL).kind, "none");
+  // own flow expired -> expired (tab disarms itself); someone else's expired flow -> silent ignore
+  const old = { ...st, ts: now - TTL - 1 };
+  assert.strictEqual(L.tabDecision(old, mine, now, TTL).kind, "expired");
+  assert.deepStrictEqual(L.tabDecision(old, "", now, TTL), { kind: "otherTab", active: false });
+  // legacy state (no owner / no part) never acts, even with a fastbuy window.name
+  assert.strictEqual(L.tabDecision({ ts: now - 1000 }, mine, now, TTL).kind, "legacy");
+  assert.strictEqual(L.tabDecision({ owner: "abc-123", ts: now - 1000 }, mine, now, TTL).kind, "legacy");
+  // two tabs read the same state: exactly one may act
+  const tabs = [mine, "", L.tabName("zzz")].map((n) => L.tabDecision(st, n, now, TTL).kind);
+  assert.deepStrictEqual(tabs.filter((k) => k === "act").length, 1);
+});
+
+test("per-tab ownership wiring (source check)", () => {
+  // the tab is bound only after the arming read-back confirms the owner
+  assert.ok(/if \(!L\.ownerMatches\(await load\(\), owner\)\) return banner[^\n]*\n[^\n]*\n\s*window\.name = L\.tabName\(owner\);/.test(SRC));
+  // no unconditional adoption of the stored owner any more
+  assert.ok(!/myOwner = st\.owner \|\| null/.test(SRC));
+  assert.ok(/const td = L\.tabDecision\(st, window\.name, Date\.now\(\), TTL_MS\);/.test(SRC));
+  assert.ok(SRC.includes('"fastbuy: 唔係呢個分頁嘅流程"'));
+  // disarm and reset unbind the tab; save requires this tab's binding
+  assert.ok(/const disarm = async \(\) => \{[^}]*GM\.deleteValue\(KEY\);\s*clearTab\(\);/.test(SRC));
+  assert.ok(/d\.kind === "reset"\) \{\s*await GM\.deleteValue\(KEY\);\s*clearTab\(\);/.test(SRC));
+  assert.ok(/L\.tabOwner\(window\.name\) !== myOwner \|\| !L\.ownerMatches\(await load\(\), myOwner\)/.test(SRC));
 });
 
 test("parseArm: store number, reset, nothing", () => {
@@ -233,9 +273,9 @@ test("mayCheckout: bag check required unless fast checkout is enabled", () => {
 });
 
 test("FAST_CHECKOUT=false: attach never goes to checkout/start, always bag", () => {
-  const s1 = L.onAttach(afterFastAdd1, { token: T2, qty: 2, fastCheckout: false });
+  const s1 = L.onAttach(afterUiAdd1, att({ token: T2, fastCheckout: false }));
   assert.strictEqual(s1.go.kind, "atb");
-  const r = L.onAttach(s1.st, { token: T1, qty: 2, fastCheckout: false });
+  const r = L.onAttach(s1.st, att({ token: T1, fastCheckout: false }));
   assert.strictEqual(r.go.kind, "bag");
 });
 
@@ -254,6 +294,38 @@ test("preContinueCheck: store and slot must still be the chosen ones", () => {
   assert.strictEqual(L.preContinueCheck({ ...ok, checkedStore: undefined }).reason, "store");
   assert.strictEqual(L.preContinueCheck({ ...ok, slotValue: "9-10:00-10:15" }).reason, "slot");
   assert.strictEqual(L.preContinueCheck({ ...ok, chosenSlot: null, slotValue: null }).reason, "slot");
+  assert.strictEqual(L.preContinueCheck({ ...ok, slotDisabled: true }).reason, "slot");
+});
+
+test("preContinueCheck: final re-check catches a day change", () => {
+  const ok = { checkedStore: "R673", chosenStore: "R673", checkedDay: "9", chosenDay: "9", slotValue: "9-19:00-19:15", chosenSlot: "9-19:00-19:15" };
+  assert.strictEqual(L.preContinueCheck(ok).kind, "ok");
+  assert.strictEqual(L.preContinueCheck({ ...ok, checkedDay: "10" }).reason, "day"); // page switched day
+  assert.strictEqual(L.preContinueCheck({ ...ok, checkedDay: undefined }).reason, "day"); // day radio unchecked
+  assert.strictEqual(L.preContinueCheck({ ...ok, chosenDay: undefined }).reason, "day"); // a day radio appeared
+  // page without day radios at all: both absent -> ok
+  assert.strictEqual(L.preContinueCheck({ ...ok, checkedDay: undefined, chosenDay: undefined }).kind, "ok");
+  // wired into the page with the checked day radio
+  assert.ok(/checkedDay: \$\('input\[type=radio\]\[name\$="dayRadio"\]:checked'\)\?\.value,\s*chosenDay: checkedDay,/.test(SRC));
+});
+
+test("disabled <option>s are never slot candidates", () => {
+  const opts = [
+    { value: "9-19:00-19:15", disabled: true },
+    { value: "9-19:30-19:45", disabled: false },
+    { value: "9-10:00-10:15", disabled: false },
+    { value: "", disabled: false },
+    { value: "Select a time", disabled: false },
+  ];
+  assert.deepStrictEqual(L.slotCandidates(opts), ["9-19:30-19:45", "9-10:00-10:15"]);
+  assert.strictEqual(L.chooseSlot(L.slotCandidates(opts), true, m("10:00")), "9-19:30-19:45");
+  // chooseSlot itself also drops disabled option-like entries
+  assert.strictEqual(L.chooseSlot(opts, true, m("10:00")), "9-19:30-19:45");
+  assert.strictEqual(L.chooseSlot([{ value: "9-19:00-19:15", disabled: true }], true, m("10:00")), null);
+  assert.deepStrictEqual(L.slotCandidates(null), []);
+  // page uses the filtered candidates and refuses a disabled match
+  assert.ok(/const allSlots = L\.slotCandidates\(slotSelect\.options\);/.test(SRC));
+  assert.ok(/o\.value === choiceValue && !o\.disabled/.test(SRC));
 });
 
 test("no Continue fallback when the slot cannot be verified (source check)", () => {
@@ -262,7 +334,6 @@ test("no Continue fallback when the slot cannot be verified (source check)", () 
 });
 
 // Item 12: slot ranking. Values "D-HH:MM-HH:MM".
-const m = (hhmm) => Number(hhmm.slice(0, 2)) * 60 + Number(hhmm.slice(3));
 test("chooseSlot: earliest 19:00+ slot wins", () => {
   const v = ["9-10:00-10:15", "9-19:30-19:45", "9-19:00-19:15", "9-20:00-20:15"];
   assert.strictEqual(L.chooseSlot(v, true, m("10:00")), "9-19:00-19:15");
@@ -310,6 +381,9 @@ test("never-click guards still present (source check)", () => {
   assert.ok(SRC.includes('"continue-button-placeOrder", "authorizePayment", "continue-button-review"'));
   assert.ok(/place order\|authori\[sz\]e/.test(SRC));
   assert.ok(/\\bpay\\b/.test(SRC));
+  assert.ok(/apple\\s\*pay/.test(SRC));
+  // the only Apple Pay control ever clicked is the bag's checkout entry, and only on www.apple.com/.../shop/bag
+  assert.ok(SRC.includes('autom === BAG_APPLE_PAY_CHECKOUT && location.hostname === "www.apple.com"'));
 });
 
 console.log(passed + " tests passed");
