@@ -10,3 +10,4 @@ pw-profile/
 *.har
 pair_test.py
 monitor.log
+fastbuy.user.js

@@ -116,7 +116,7 @@ def scan(targets=None, queries=None, on_hit=None):
         for store in pm.get("stores", []):
             for part, info in store.get("partsAvailability", {}).items():
                 if part in targets and info.get("pickupDisplay") == "available":
-                    hits[(part, store["storeName"])] = (targets[part][0], info.get("pickupSearchQuote", ""))
+                    hits[(part, store["storeName"])] = (targets[part][0], info.get("pickupSearchQuote", ""), store.get("storeNumber", ""))
         found.update(hits)
         if hits and on_hit:
             on_hit(hits)
@@ -127,8 +127,10 @@ def fmt(found, targets=None):
     targets = targets or TARGETS
     hkt = time.strftime("%H:%M:%S", time.gmtime(time.time() + 8 * 3600))
     lines = [f"iPhone 18 Pro Max 今日有得自取 (見到 {hkt} HKT，未留貨):"]
-    for (part, store), (label, quote) in sorted(found.items()):
-        lines.append(f"- {label} @ Apple {store} ({quote})\n  商品頁: {targets[part][1]}")
+    for (part, store), (label, quote, *rest) in sorted(found.items()):
+        num = rest[0] if rest else ""
+        link = targets[part][1] + (f"#fastbuy={num}" if num else "")
+        lines.append(f"- {label} @ Apple {store} ({quote})\n  {link}")
     lines.append(f"Bag: {BAG_URL}  -> Check out -> Pick up -> 揀返上面間舖")
     return "\n".join(lines)
 
