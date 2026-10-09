@@ -44,7 +44,9 @@ GAP = 3  # seconds between the requests inside one cycle (sequential mode)
 # Only during BURST_WINDOW (HKT) -- stock was seen only 07:27-08:46 HKT on 10/08-10/09 (state commits / run logs).
 BURST_WINDOW = os.environ.get("BURST_WINDOW", "07:00-09:30")
 BURST_EVERY = int(os.environ.get("BURST_EVERY", "5"))
-BURST_FOR = int(os.environ.get("BURST_FOR", "52"))
+# One GitHub run polls ~4.5 min; the next cron-triggered run is queued and starts right after,
+# so runner start-up (observed ~19s, run 37984743911) is paid once per run, not once per minute.
+BURST_FOR = int(os.environ.get("BURST_FOR", "270"))
 
 
 def load_env():
@@ -194,7 +196,7 @@ def cron_run():
 
     burst = in_burst_window()
     deadline = time.time() + (BURST_FOR if burst else 0)
-    passes = 0
+    passes, last_pass = 0, None
     while True:
         alerted, failed = {}, set()
 
@@ -213,9 +215,11 @@ def cron_run():
             notify(f"iPhone monitor paused: Apple no longer answering normally ({e}). Check manually; delete .blocked to resume.")
             return
         passes += 1
+        gap = f" gap={time.time() - last_pass:.1f}s" if last_pass else ""
+        last_pass = time.time()
         prev = set(found) - failed  # an item that disappears and comes back alerts again
         write_atomic(STATE, json.dumps(sorted(prev)))
-        print(f"{time.strftime('%F %T')} pass={passes} burst={burst} seen={len(found)} new={len(alerted)}", flush=True)
+        print(f"{time.strftime('%F %T')} pass={passes}{gap} burst={burst} seen={len(found)} new={len(alerted)}", flush=True)
         # Next pass on the next BURST_EVERY-second boundary (…:00, :05, :10 …) while time remains.
         nxt = (int(time.time()) // BURST_EVERY + 1) * BURST_EVERY
         if not burst or nxt >= deadline:
