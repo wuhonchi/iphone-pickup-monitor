@@ -13,7 +13,7 @@ It does not retry around blocks.
   python3 monitor.py --once     # one cycle, print result
   python3 monitor.py --cron     # one cycle with saved state (for crontab)
 """
-import concurrent.futures, fcntl, json, os, random, subprocess, sys, time, urllib.error, urllib.parse, urllib.request
+import calendar, concurrent.futures, fcntl, json, os, queue, threading, random, subprocess, sys, time, urllib.error, urllib.parse, urllib.request
 from pathlib import Path
 
 ROOT = Path(__file__).parent
@@ -92,11 +92,11 @@ class Blocked(Exception):
     pass
 
 
-def fetch(product):
+def fetch(product, timeout=20):
     q = urllib.parse.urlencode({"fae": "true", "mts.0": "regular", "location": LOCATION, "product": product})
     req = urllib.request.Request(f"{BASE}?{q}", headers={"User-Agent": "Mozilla/5.0", "Accept": "application/json"})
     try:
-        with urllib.request.urlopen(req, timeout=20) as r:
+        with urllib.request.urlopen(req, timeout=timeout) as r:
             status, ctype, body = r.status, r.headers.get("Content-Type", ""), r.read()
     except urllib.error.HTTPError as e:
         if e.code in (500, 502, 503, 504):  # server hiccup: retry next run (541 = Apple's block page)
@@ -227,6 +227,161 @@ def cron_run():
         time.sleep(max(0, nxt - time.time()))
 
 
+# ---------------------------------------------------------------------------
+# Minute-owner mode (--minute): cron-job.org dispatches a run every minute; each run owns the
+# NEXT wall-clock minute after its creation and polls its 12 ticks (:00,:05,...,:55) on time.
+# Runs overlap only while the next one warms up, so there is no hand-off gap (design X, review round 9).
+TICK = 5
+TICK_TIMEOUT = 4.0           # per Apple request, so a tick finishes before the next one
+REMOTE_BLOCK_EVERY = 3       # check the shared .blocked flag every 3 ticks (15 s)
+
+
+def _gh_api(path):
+    repo, tok = os.environ.get("GITHUB_REPOSITORY"), os.environ.get("GITHUB_TOKEN")
+    if not (repo and tok):
+        return None, None
+    req = urllib.request.Request(f"https://api.github.com/repos/{repo}/{path}",
+                                 headers={"Authorization": f"Bearer {tok}", "Accept": "application/vnd.github+json"})
+    try:
+        with urllib.request.urlopen(req, timeout=5) as r:
+            return r.status, json.loads(r.read() or b"null")
+    except urllib.error.HTTPError as e:
+        return e.code, None
+    except Exception:
+        return None, None
+
+
+def run_created_epoch():
+    """Creation time of this workflow run (fixed reference for minute ownership); falls back to now."""
+    rid = os.environ.get("GITHUB_RUN_ID")
+    if rid:
+        status, body = _gh_api(f"actions/runs/{rid}")
+        if status == 200 and body and body.get("created_at"):
+            return calendar.timegm(time.strptime(body["created_at"], "%Y-%m-%dT%H:%M:%SZ"))
+    return time.time()
+
+
+def remote_blocked():
+    status, _ = _gh_api("contents/.blocked?ref=main")
+    return status == 200
+
+
+def push_blocked(reason):
+    write_atomic(BLOCKED_FLAG, f"{time.strftime('%F %T')} {reason}\n")
+    if os.environ.get("GITHUB_ACTIONS"):
+        for cmd in (["git", "add", ".blocked"], ["git", "commit", "-q", "-m", "monitor blocked"],
+                    ["git", "pull", "-q", "--rebase"], ["git", "push", "-q"]):
+            subprocess.run(cmd, timeout=30)
+
+
+def fetch_all(queries, timeout):
+    """All queries in parallel. A Blocked response wins over any other error."""
+    results, errors = [], []
+    with concurrent.futures.ThreadPoolExecutor(max_workers=len(queries)) as ex:
+        futs = [ex.submit(fetch, q, timeout) for q in queries]
+        for f in concurrent.futures.as_completed(futs):
+            try:
+                results.append(f.result())
+            except Exception as e:  # classified below
+                errors.append(e)
+    blocked = [e for e in errors if isinstance(e, Blocked)]
+    if blocked:
+        raise blocked[0]
+    return results, errors
+
+
+class Notifier:
+    """Sends Telegram messages on a background thread so polling never waits for it."""
+
+    def __init__(self, send):
+        self.q, self.send, self.results = queue.Queue(), send, []
+        self.t = threading.Thread(target=self._loop, daemon=True)
+        self.t.start()
+
+    def _loop(self):
+        while True:
+            item = self.q.get()
+            if item is None:
+                return
+            keys, text = item
+            self.results.append((keys, self.send(text)))
+
+    def put(self, keys, text):
+        self.q.put((keys, text))
+
+    def close(self, timeout=20):
+        self.q.put(None)
+        self.t.join(timeout)
+
+
+def minute_run(owned_start=None, ticks_per_min=60 // TICK, now=time.time, sleep=time.sleep):
+    if BLOCKED_FLAG.exists() or remote_blocked():
+        print(f"{time.strftime('%F %T')} skipped: blocked", flush=True)
+        return
+    try:
+        prev = {tuple(x) for x in json.loads(STATE.read_text())}
+    except Exception:
+        prev = set()
+    if owned_start is None:
+        owned_start = (int(run_created_epoch()) // 60 + 1) * 60
+    lock = threading.Lock()
+    alerted, stop = set(), threading.Event()
+    last_seen = {"found": None}
+    notifier = Notifier(notify)
+    missed = []
+
+    def do_tick(i, t):
+        if stop.is_set():
+            return
+        if i % REMOTE_BLOCK_EVERY == 0 and remote_blocked():
+            stop.set()
+            print(f"tick {i} stop: shared .blocked found", flush=True)
+            return
+        t0 = now()
+        try:
+            results, errors = fetch_all(QUERIES, TICK_TIMEOUT)
+        except Blocked as e:
+            if not stop.is_set():
+                stop.set()
+                push_blocked(e)
+                notifier.put(set(), f"iPhone monitor paused: Apple no longer answering normally ({e}). Check manually; delete .blocked to resume.")
+            return
+        found = {}
+        for r in results:
+            found.update(_hits(r["body"]["PickupMessage"], TARGETS))
+        with lock:
+            new = {k: v for k, v in found.items() if k not in prev and k not in alerted}
+            alerted.update(new)
+            if not errors:  # only a complete scan may mark items as gone
+                last_seen["found"] = found
+        if new:
+            notifier.put(set(new), fmt(new))
+        hms = time.strftime("%H:%M:%S", time.gmtime(t))
+        print(f"tick {hms} start+{t0 - t:.2f}s took={now() - t0:.2f}s seen={len(found)} new={len(new)} errors={len(errors)}", flush=True)
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=4) as pool:
+        for i in range(ticks_per_min):
+            t = owned_start + i * TICK
+            if stop.is_set():
+                break
+            if i > 0 and not in_burst_window(t):
+                break  # outside the window: one check per minute is enough
+            wait = t - now()
+            if wait > 0:
+                sleep(wait)
+            elif wait < -1:
+                missed.append(i)
+                print(f"tick {time.strftime('%H:%M:%S', time.gmtime(t))} missed (runner ready {-wait:.1f}s late)", flush=True)
+                continue
+            pool.submit(do_tick, i, t)
+    notifier.close()
+    failed = set().union(*[k for k, ok in notifier.results if not ok]) if notifier.results else set()
+    final = last_seen["found"]
+    if final is not None:
+        write_atomic(STATE, json.dumps(sorted(set(final) - failed)))
+    print(f"minute {time.strftime('%H:%M', time.gmtime(owned_start))} done alerted={len(alerted)} missed_ticks={len(missed)}", flush=True)
+
+
 def main():
     load_env()
     if "--selftest" in sys.argv:
@@ -235,6 +390,9 @@ def main():
         found = scan(targets=t, queries=["MJXQ4ZA/A"])
         msg = ("[TEST] " + fmt(found, t)) if found else "[TEST] monitor reachable, but 2TB stand-in not seen now"
         sys.exit(0 if notify(msg) else 1)
+    if "--minute" in sys.argv:
+        minute_run()
+        return
     if "--cron" in sys.argv:
         cron_run()
         return

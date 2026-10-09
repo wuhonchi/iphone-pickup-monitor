@@ -1,6 +1,8 @@
 name: iphone-pickup-monitor
 
-# Triggered every few minutes by cron-job.org via the GitHub API (workflow_dispatch).
+# cron-job.org dispatches this every minute. Each dispatched run owns the NEXT wall-clock minute
+# and checks every 5 s (07:00-09:30 HKT) or once (other times). Runs are NOT queued: the next one
+# warms up while the current one is still checking, so there is no hand-off gap.
 # The schedule below is only a slow fallback in case cron-job.org stops.
 on:
   workflow_dispatch:
@@ -10,7 +12,7 @@ on:
         type: boolean
         default: false
       burst_window:
-        description: "Override burst window HHMM-HHMM HKT (testing only)"
+        description: "Override 5-second window HH:MM-HH:MM HKT (testing only)"
         type: string
         default: ""
   schedule:
@@ -18,15 +20,12 @@ on:
 
 permissions:
   contents: write  # commit .state.json / .blocked back so runs remember what was alerted
-
-concurrency:
-  group: monitor
-  cancel-in-progress: false
+  actions: read    # read this run's creation time (minute ownership)
 
 jobs:
   check:
     runs-on: ubuntu-latest
-    timeout-minutes: 7
+    timeout-minutes: 4
     steps:
       - uses: actions/checkout@v4
 
@@ -34,8 +33,9 @@ jobs:
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-          BURST_WINDOW: ${{ inputs.burst_window || '07:00-09:30' }}
-        run: python3 monitor.py ${{ inputs.selftest && '--selftest' || '--cron' }}
+          GITHUB_TOKEN: ${{ github.token }}
+          BURST_WINDOW: ${{ inputs.burst_window || vars.BURST_WINDOW || '07:00-09:30' }}
+        run: python3 monitor.py ${{ inputs.selftest && '--selftest' || (github.event_name == 'workflow_dispatch' && '--minute' || '--cron') }}
 
       - name: Save state
         if: always()
@@ -45,4 +45,5 @@ jobs:
           for f in .state.json .blocked; do [ -e "$f" ] && git add "$f"; done
           if git diff --cached --quiet; then echo "state unchanged"; exit 0; fi
           git commit -m "monitor state $(date -u +%FT%TZ)"
-          git pull --rebase --quiet && git push
+          for i in 1 2 3; do git pull --rebase -X theirs --quiet && git push && exit 0; sleep 2; done
+          echo "state push failed after 3 tries"
