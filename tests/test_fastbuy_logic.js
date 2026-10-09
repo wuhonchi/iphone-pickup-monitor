@@ -164,9 +164,9 @@ test("checkout/start landing outcomes", () => {
 
 // ---- v0.13/v0.14 safety ----
 
-test("FAST_CHECKOUT is off by default and @version is 0.19", () => {
+test("FAST_CHECKOUT is off by default and @version is 0.20", () => {
   assert.match(SRC, /^const FAST_CHECKOUT = false;/m);
-  assert.match(SRC, /^\/\/ @version\s+0\.19$/m);
+  assert.match(SRC, /^\/\/ @version\s+0\.20$/m);
 });
 
 test("owner id: random, and guarded writes need the stored owner to match", () => {
@@ -218,7 +218,7 @@ test("per-tab ownership wiring (source check)", () => {
   assert.ok(/const td = L\.tabDecision\(st, window\.name, Date\.now\(\), TTL_MS\);/.test(SRC));
   assert.ok(SRC.includes('"fastbuy: 唔係呢個分頁嘅流程"'));
   // disarm and reset unbind the tab; save requires this tab's binding
-  assert.ok(/const disarm = async \(\) => \{[^}]*GM\.deleteValue\(KEY\);\s*clearTab\(\);/.test(SRC));
+  assert.ok(/const disarm = async \(\) => \{\s*try \{[^}]*GM\.deleteValue\(KEY\);\s*\} finally \{\s*clearTab\(\);/.test(SRC));
   assert.ok(/d\.kind === "reset"\) \{\s*await GM\.deleteValue\(KEY\);\s*clearTab\(\);/.test(SRC));
   assert.ok(/L\.tabOwner\(window\.name\) !== myOwner \|\| !L\.ownerMatches\(await load\(\), myOwner\)/.test(SRC));
 });
@@ -430,7 +430,9 @@ test("seconds count: 18:00:59 is after an 18:00 slot (review round 13)", () => {
 });
 test("Continue: slot/store/day verified synchronously after the async owner read (review round 14)", () => {
   // the verify callback runs after `await load()` and right before click, with no await in between
-  assert.ok(/if \(L\.tabOwner\(window\.name\) !== myOwner \|\| !L\.ownerMatches\(await load\(\), myOwner\)\)[^\n]*\n\s*if \(verify\) verify\(\);\n\s*click\(el\);/.test(SRC));
+  assert.ok(/const assertOwned = async \(\) => \{\n\s*if \(L\.tabOwner\(window\.name\) !== myOwner \|\| !L\.ownerMatches\(await load\(\), myOwner\)\)/.test(SRC));
+  for (const act of ["click\\(el\\)", "setNative\\(el, proto, value, events\\)", "location\\.href = url"])
+    assert.ok(new RegExp("await assertOwned\\(\\);\\n\\s*if \\(verify\\) verify\\(\\);\\n\\s*" + act + ";").test(SRC), act);
   assert.ok(SRC.includes("await clickOwned(cont, verifyBeforeContinue)"));
   // simulate: check passes at 17:59:59.900, GM read takes 200 ms, click happens at 18:00:00.100 -> must refuse
   const at = (h, mi, se, ms) => Date.UTC(2026, 9, 10, h - 8, mi, se, ms);
@@ -442,12 +444,13 @@ test("Continue: slot/store/day verified synchronously after the async owner read
 });
 test("Add to Bag / Check Out: DOM changes during the async owner read stop the click (review round 15)", () => {
   // Extract the real clickOwned and run it with a load() that mutates the page while it is pending.
+  const ao = SRC.match(/const assertOwned = async \(\) => \{[\s\S]*?\n  \};/);
   const m = SRC.match(/const clickOwned = async \(el, verify\) => \{[\s\S]*?\n  \};/);
-  assert.ok(m, "clickOwned source");
+  assert.ok(ao && m, "assertOwned / clickOwned source");
   const run = async (mutate, verify) => {
     let clicked = 0;
     const owner = "o1";
-    const fn = new Function("L", "window", "myOwner", "load", "click", "return " + m[0].replace(/^const clickOwned = /, "").replace(/;$/, ""));
+    const fn = new Function("L", "window", "myOwner", "load", "click", ao[0] + "\nreturn " + m[0].replace(/^const clickOwned = /, "").replace(/;$/, ""));
     const clickOwned = fn(
       { tabOwner: () => owner, ownerMatches: () => true }, { name: "x" }, owner,
       async () => { mutate(); return {}; }, () => { clicked++; }
@@ -475,5 +478,74 @@ test("Add to Bag / Check Out: DOM changes during the async owner read stop the c
     r = await run(() => {}, vBag);
     assert.strictEqual(r.clicked, 1);
   })();
+});
+test("every flow-advancing action is owner-checked: no raw click/setNative/navigation outside the helpers (review round 16)", () => {
+  const helpersStart = SRC.indexOf("  function click(el) {");
+  const helpersEnd = SRC.indexOf("  const navOwned = async (url, verify) => {");
+  assert.ok(helpersStart > 0 && helpersEnd > helpersStart);
+  const navEnd = SRC.indexOf("};", helpersEnd) + 2;
+  const outside = SRC.slice(0, helpersStart) + SRC.slice(navEnd);
+  const flow = outside.slice(outside.indexOf("  try {\n    // 0. A pending add"));
+  assert.ok(flow.length > 1000, "flow block found");
+  assert.ok(!/location\.href\s*=/.test(flow), "raw navigation");
+  assert.ok(!/(^|[^\w.])setNative\(/.test(flow), "raw setNative");
+  assert.ok(!/(^|[^\w.])click\(/.test(flow), "raw click");
+  assert.ok(!/\.click\(\)/.test(flow), "raw element.click()");
+  assert.ok(/try \{\n\s*if \(hasGM && L\.ownerMatches\(await load\(\), myOwner\)\) await GM\.deleteValue\(KEY\);\n\s*\} finally \{\n\s*clearTab\(\);/.test(SRC), "disarm clears the tab binding even if delete fails");
+});
+
+// Run a real callback from the source against a tiny fake DOM.
+const extractFn = (name) => {
+  const start = SRC.indexOf(`const ${name} = () => {`);
+  assert.ok(start > 0, name);
+  let depth = 0, i = SRC.indexOf("{", start);
+  for (; i < SRC.length; i++) { if (SRC[i] === "{") depth++; else if (SRC[i] === "}" && --depth === 0) break; }
+  return SRC.slice(SRC.indexOf("() =>", start), i + 1);
+};
+
+test("verifyBeforeAtb (real source): No trade-in / No AppleCare must still be selected (review round 16)", () => {
+  const body = extractFn("verifyBeforeAtb");
+  const make = (dom) => new Function("L", "st", "pagePart", "name", "atb", "$", "return " + body)(
+    L, { armedPart: "MJXV4ZA/A" }, () => "MJXV4ZA/A", "iPhone", dom.atb, (q) => dom[q]);
+  const atb = { disabled: false };
+  const base = () => ({ atb, '[data-autom="summary-productName"]': { innerText: "iPhone" }, '[data-autom="add-to-cart"]': atb,
+    '[data-autom="choose-noTradeIn"]': { checked: true }, '[data-autom="noapplecare"]': { checked: true } });
+  make(base())(); // unchanged -> ok
+  const d1 = base(); d1['[data-autom="noapplecare"]'] = { checked: false };
+  assert.throws(() => make(d1)(), /No AppleCare/);
+  const d2 = base(); d2['[data-autom="choose-noTradeIn"]'] = { checked: false };
+  assert.throws(() => make(d2)(), /No trade-in/);
+});
+
+test("verifyBeforeContinue (real source): selected store/day disabled or Continue changed -> stop (review round 16)", () => {
+  const body = extractFn("verifyBeforeContinue");
+  const at = (h, mi) => Date.UTC(2026, 9, 10, h - 8, mi, 0);
+  const run = (mut) => {
+    const store = { value: "R673", checked: true, disabled: false };
+    const day = { value: "10", checked: true, disabled: false };
+    const opt = { disabled: false };
+    const sel = { value: "10-19:00-19:15", selectedOptions: [opt] };
+    const cont = { disabled: false };
+    let contNow = cont;
+    const env = { store, day, opt, sel, setCont: (c) => { contNow = c; } };
+    mut(env);
+    const realNow = Date.now;
+    Date.now = () => at(17, 0);
+    try {
+      new Function("L", "findSlotSelect", "storeRadios", "$", "chosenStore", "checkedDay", "slotChoice", "enabledCont", "cont", "return " + body)(
+        L, () => sel, () => [store], (q) => (/dayRadio/.test(q) ? day : null), "R673", "10", "10-19:00-19:15", () => contNow, cont)();
+    } finally { Date.now = realNow; }
+  };
+  run(() => {}); // unchanged -> ok
+  assert.throws(() => run((e) => { e.store.disabled = true; }), /舖頭/);
+  assert.throws(() => run((e) => { e.day.disabled = true; }), /日子/);
+  assert.throws(() => run((e) => { e.setCont(null); }), /Continue/);
+  assert.throws(() => run((e) => { e.opt.disabled = true; }), /時段/);
+});
+
+test("attach navigation re-checks ownership after the state write (review round 16)", () => {
+  const step2 = SRC.slice(SRC.indexOf("// 2. Accessory upsell page"), SRC.indexOf("// 2b."));
+  assert.ok(/await next\(r\.st\.stage, r\.st\);[\s\S]*await navOwned\(r\.go\.url, verifyAttach\)/.test(step2));
+  assert.ok(!/location\.href\s*=/.test(step2));
 });
 Promise.all(pending).then(() => console.log(passed + " tests passed"));
