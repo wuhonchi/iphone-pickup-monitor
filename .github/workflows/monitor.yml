@@ -9,6 +9,10 @@ on:
         description: "Send a test Telegram using an in-stock stand-in model"
         type: boolean
         default: false
+      burst_window:
+        description: "Override burst window HHMM-HHMM HKT (testing only)"
+        type: string
+        default: ""
   schedule:
     - cron: "*/30 * * * *"
 
@@ -30,6 +34,7 @@ jobs:
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          BURST_WINDOW: ${{ inputs.burst_window || '07:00-09:30' }}
         run: python3 monitor.py ${{ inputs.selftest && '--selftest' || '--cron' }}
 
       - name: Save state
