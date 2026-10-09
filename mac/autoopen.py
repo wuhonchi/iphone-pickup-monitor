@@ -11,7 +11,10 @@ Safari's userscript then prepares checkout; paying is always manual.
 import json, os, subprocess, sys, time, urllib.parse, urllib.request
 from pathlib import Path
 
-ENV = Path("/Users/wuhonchi/Documents/iphone/.env")
+# Installed copy reads the .env next to itself (~/Library/Application Support/iphone-autoopen/),
+# because launchd jobs cannot read ~/Documents without Full Disk Access.
+_here = Path(__file__).resolve().parent / ".env"
+ENV = _here if _here.exists() else Path("/Users/wuhonchi/Documents/iphone/.env")
 PREFIXES = ["https://www.apple.com/hk/shop/"]
 if os.environ.get("AUTOOPEN_TEST_URL_PREFIX"):
     PREFIXES.append(os.environ["AUTOOPEN_TEST_URL_PREFIX"])

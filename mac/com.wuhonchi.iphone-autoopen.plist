@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<!-- Install: cp mac/com.wuhonchi.iphone-autoopen.plist ~/Library/LaunchAgents/ &&
-     launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.wuhonchi.iphone-autoopen.plist -->
+<!-- Install: see mac/install.sh (copies autoopen.py + a topic-only .env to ~/Library/Application Support/iphone-autoopen,
+     since launchd jobs cannot read ~/Documents). -->
 <plist version="1.0">
 <dict>
 	<key>Label</key>
@@ -10,7 +10,7 @@
 	<array>
 		<string>/usr/bin/python3</string>
 		<string>-u</string>
-		<string>/Users/wuhonchi/Documents/iphone/mac/autoopen.py</string>
+		<string>/Users/wuhonchi/Library/Application Support/iphone-autoopen/autoopen.py</string>
 	</array>
 	<key>RunAtLoad</key>
 	<true/>
@@ -19,8 +19,8 @@
 	<key>ThrottleInterval</key>
 	<integer>10</integer>
 	<key>StandardOutPath</key>
-	<string>/Users/wuhonchi/Documents/iphone/mac/autoopen.log</string>
+	<string>/Users/wuhonchi/Library/Application Support/iphone-autoopen/autoopen.log</string>
 	<key>StandardErrorPath</key>
-	<string>/Users/wuhonchi/Documents/iphone/mac/autoopen.log</string>
+	<string>/Users/wuhonchi/Library/Application Support/iphone-autoopen/autoopen.log</string>
 </dict>
 </plist>
