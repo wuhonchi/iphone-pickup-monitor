@@ -12,6 +12,8 @@ It does not retry around blocks.
   python3 monitor.py            # loop forever
   python3 monitor.py --once     # one cycle, print result
   python3 monitor.py --cron     # one cycle with saved state (for crontab)
+  python3 monitor.py --minute   # GitHub Actions dispatch: own one wall-clock minute
+  python3 monitor.py --fallback # GitHub Actions schedule: single pass only if no dispatch is active
 """
 import calendar, concurrent.futures, fcntl, json, os, queue, threading, random, subprocess, sys, time, urllib.error, urllib.parse, urllib.request
 from pathlib import Path
@@ -280,15 +282,53 @@ def _gh_api(path):
         return None, None
 
 
+def _epoch(created_at):
+    return calendar.timegm(time.strptime(created_at, "%Y-%m-%dT%H:%M:%SZ"))
+
+
+WORKFLOW_RUNS = "actions/workflows/monitor.yml/runs?event=workflow_dispatch&per_page=20"
+
+
 def run_created_epoch():
-    """Creation time of this workflow run (fixed reference for minute ownership); falls back to now."""
+    """Creation time of this workflow run (fixed reference for minute ownership); None if unknown."""
     rid = os.environ.get("GITHUB_RUN_ID")
     if rid:
         status, body = _gh_api(f"actions/runs/{rid}")
-        if status == 200 and body and body.get("created_at"):
-            return calendar.timegm(time.strptime(body["created_at"], "%Y-%m-%dT%H:%M:%SZ"))
-    print(f"{time.strftime('%F %T')} created_at unknown, using now", flush=True)
-    return time.time()
+        try:
+            if status == 200 and body and body.get("created_at"):
+                return _epoch(body["created_at"])
+        except (ValueError, AttributeError):
+            pass
+    return None
+
+
+def duplicate_dispatch(created):
+    """True = an older dispatch run (smaller id) was created in the same wall-clock minute;
+    False = none; None = listing failed (unknown)."""
+    rid = int(os.environ.get("GITHUB_RUN_ID") or 0)
+    status, body = _gh_api(WORKFLOW_RUNS)
+    try:
+        runs = body["workflow_runs"] if status == 200 else None
+        if runs is None:
+            return None
+        return any(int(r["id"]) < rid and _epoch(r["created_at"]) // 60 == int(created) // 60 for r in runs)
+    except (TypeError, KeyError, ValueError, AttributeError):
+        return None
+
+
+def resolve_owned_start():
+    """Start epoch of the minute this run owns, or None if this run must not poll."""
+    created = run_created_epoch()
+    if created is None:
+        print(f"{time.strftime('%F %T')} skipped: created_at unknown", flush=True)
+        return None
+    dup = duplicate_dispatch(created)
+    if dup is True:
+        print(f"{time.strftime('%F %T')} skipped: duplicate dispatch for this minute", flush=True)
+        return None
+    if dup is None:
+        print(f"{time.strftime('%F %T')} duplicate check unknown (proceeding; ownership by created minute)", flush=True)
+    return (int(created) // 60 + 1) * 60
 
 
 def remote_blocked():
@@ -302,17 +342,26 @@ def remote_blocked():
 
 
 def push_blocked(reason):
+    """Write .blocked locally; in GitHub Actions also commit + push it so other runs see it.
+    Returns True only if every git command succeeded (or nothing needed pushing: not in Actions)."""
     write_atomic(BLOCKED_FLAG, f"{time.strftime('%F %T')} {reason}\n")
-    if os.environ.get("GITHUB_ACTIONS"):
-        for cmd in (["git", "add", ".blocked"], ["git", "commit", "-q", "-m", "monitor blocked"],
-                    ["git", "pull", "-q", "--rebase"], ["git", "push", "-q"]):
-            try:
-                rc = subprocess.run(cmd, timeout=30).returncode
-            except Exception as e:
-                print(f"push_blocked: {' '.join(cmd)} failed: {e}", flush=True)
-                continue
-            if rc != 0:
-                print(f"push_blocked: {' '.join(cmd)} exited {rc}", flush=True)
+    if not os.environ.get("GITHUB_ACTIONS"):
+        return True
+    ok = True
+    for cmd in (["git", "add", ".blocked"], ["git", "commit", "-q", "-m", "monitor blocked"],
+                ["git", "pull", "-q", "--rebase"], ["git", "push", "-q"]):
+        try:
+            rc = subprocess.run(cmd, timeout=30).returncode
+        except Exception as e:
+            print(f"push_blocked: {' '.join(cmd)} failed: {e}", flush=True)
+            ok = False
+            continue
+        if rc != 0:
+            print(f"push_blocked: {' '.join(cmd)} exited {rc}", flush=True)
+            ok = False
+    if not ok:
+        print("push_blocked: .blocked push FAILED; other runs may not see the flag", flush=True)
+    return ok
 
 
 def fetch_all(queries, timeout):
@@ -371,7 +420,9 @@ def minute_run(owned_start=None, ticks_per_min=60 // TICK, now=time.time, sleep=
     except Exception:
         prev = set()
     if owned_start is None:
-        owned_start = (int(run_created_epoch()) // 60 + 1) * 60
+        owned_start = resolve_owned_start()
+        if owned_start is None:
+            return
     lock = threading.Lock()
     alerted, stop = set(), threading.Event()
     last_seen = {"found": None}
@@ -387,8 +438,9 @@ def minute_run(owned_start=None, ticks_per_min=60 // TICK, now=time.time, sleep=
                 stop.set()
                 print(f"tick {i} stop: shared .blocked found", flush=True)
                 return
-            if rb is None:
-                print(f"tick {i} skipped: block state unknown", flush=True)
+            if rb is None:  # fail closed: stop the rest of this minute
+                stop.set()
+                print(f"tick {i} stop: block state unknown", flush=True)
                 return
         if stop.is_set():  # another tick may have hit a block while we checked
             return
@@ -398,8 +450,9 @@ def minute_run(owned_start=None, ticks_per_min=60 // TICK, now=time.time, sleep=
         except Blocked as e:
             if not stop.is_set():
                 stop.set()
-                push_blocked(e)
-                notifier.put(set(), f"iPhone monitor paused: Apple no longer answering normally ({e}). Check manually; delete .blocked to resume.")
+                pushed_ok = push_blocked(e)
+                note = "" if pushed_ok else " (.blocked push FAILED)"
+                notifier.put(set(), f"iPhone monitor paused: Apple no longer answering normally ({e}). Check manually; delete .blocked to resume.{note}")
             return
         found = {}
         for r in results:
@@ -439,6 +492,30 @@ def minute_run(owned_start=None, ticks_per_min=60 // TICK, now=time.time, sleep=
     print(f"minute {time.strftime('%H:%M', time.gmtime(owned_start))} done alerted={len(alerted)} missed_ticks={len(missed)}", flush=True)
 
 
+FALLBACK_QUIET = 180  # seconds: a dispatch run this recent means the minute owners are active
+
+
+def fallback_run(now=time.time):
+    """Schedule fallback: one cron_run pass, only when no minute-owner dispatch is active and the
+    shared .blocked is confirmed absent."""
+    status, body = _gh_api(WORKFLOW_RUNS.replace("per_page=20", "per_page=1"))
+    try:
+        runs = body["workflow_runs"] if status == 200 else None
+        latest = max((_epoch(r["created_at"]) for r in runs), default=None) if runs is not None else None
+    except (TypeError, KeyError, ValueError, AttributeError):
+        runs, latest = None, None
+    if runs is None:
+        print(f"{time.strftime('%F %T')} fallback: dispatch state unknown, running", flush=True)
+    elif latest is not None and now() - latest < FALLBACK_QUIET:
+        print(f"{time.strftime('%F %T')} fallback not needed: dispatch active", flush=True)
+        return
+    rb = remote_blocked()
+    if rb is not False:
+        print(f"{time.strftime('%F %T')} fallback skipped: {'shared .blocked' if rb else 'block state unknown'}", flush=True)
+        return
+    cron_run()
+
+
 def main():
     load_env()
     if "--selftest" in sys.argv:
@@ -449,6 +526,9 @@ def main():
         sys.exit(0 if notify(msg) else 1)
     if "--minute" in sys.argv:
         minute_run()
+        return
+    if "--fallback" in sys.argv:
+        fallback_run()
         return
     if "--cron" in sys.argv:
         cron_run()

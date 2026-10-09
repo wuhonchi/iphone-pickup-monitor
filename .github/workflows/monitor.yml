@@ -3,7 +3,8 @@ name: iphone-pickup-monitor
 # cron-job.org dispatches this every minute. Each dispatched run owns the NEXT wall-clock minute
 # and checks every 5 s (07:00-09:30 HKT) or once (other times). Runs are NOT queued: the next one
 # warms up while the current one is still checking, so there is no hand-off gap.
-# The schedule below is only a slow fallback in case cron-job.org stops.
+# The schedule below is only a slow fallback in case cron-job.org stops (--fallback: exits if a
+# dispatch run was created in the last 180 s or the shared .blocked is set/unknown; else one pass).
 on:
   workflow_dispatch:
     inputs:
@@ -20,7 +21,7 @@ on:
 
 permissions:
   contents: write  # commit .state.json / .blocked back so runs remember what was alerted
-  actions: read    # read this run's creation time (minute ownership)
+  actions: read    # read run creation times (minute ownership, duplicate check, fallback check)
 
 jobs:
   check:
@@ -41,10 +42,10 @@ jobs:
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}
           GITHUB_TOKEN: ${{ github.token }}
-          # schedule (*/30 fallback, --cron): never burst, so it does a single pass and cannot overlap
+          # schedule (*/30 fallback, --fallback -> single cron_run pass): never burst, so it does a single pass and cannot overlap
           # the minute-owner runs for 270 s. start == end means "never" (monitor.in_burst_window).
           BURST_WINDOW: ${{ github.event_name == 'schedule' && '00:00-00:00' || (inputs.burst_window || vars.BURST_WINDOW || '07:00-09:30') }}
-        run: python3 monitor.py ${{ inputs.selftest && '--selftest' || (github.event_name == 'workflow_dispatch' && '--minute' || '--cron') }}
+        run: python3 monitor.py ${{ inputs.selftest && '--selftest' || (github.event_name == 'workflow_dispatch' && '--minute' || '--fallback') }}
 
       - name: Save state
         if: always()
