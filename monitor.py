@@ -326,8 +326,9 @@ def resolve_owned_start():
     if dup is True:
         print(f"{time.strftime('%F %T')} skipped: duplicate dispatch for this minute", flush=True)
         return None
-    if dup is None:
-        print(f"{time.strftime('%F %T')} duplicate check unknown (proceeding; ownership by created minute)", flush=True)
+    if dup is None:  # fail closed: two unknown duplicates must not both poll the same minute
+        print(f"{time.strftime('%F %T')} skipped: duplicate check unknown", flush=True)
+        return None
     return (int(created) // 60 + 1) * 60
 
 
@@ -347,18 +348,24 @@ def push_blocked(reason):
     write_atomic(BLOCKED_FLAG, f"{time.strftime('%F %T')} {reason}\n")
     if not os.environ.get("GITHUB_ACTIONS"):
         return True
-    ok = True
-    for cmd in (["git", "add", ".blocked"], ["git", "commit", "-q", "-m", "monitor blocked"],
-                ["git", "pull", "-q", "--rebase"], ["git", "push", "-q"]):
+    def run(cmd):
         try:
             rc = subprocess.run(cmd, timeout=30).returncode
         except Exception as e:
             print(f"push_blocked: {' '.join(cmd)} failed: {e}", flush=True)
-            ok = False
-            continue
+            return False
         if rc != 0:
             print(f"push_blocked: {' '.join(cmd)} exited {rc}", flush=True)
-            ok = False
+        return rc == 0
+
+    ok = run(["git", "add", ".blocked"]) and run(["git", "commit", "-q", "-m", "monitor blocked"])
+    if ok:  # other runs only stop once the flag is on main: retry the push a few times
+        ok = False
+        for attempt in range(3):
+            if run(["git", "pull", "-q", "--rebase"]) and run(["git", "push", "-q"]):
+                ok = True
+                break
+            time.sleep(2)
     if not ok:
         print("push_blocked: .blocked push FAILED; other runs may not see the flag", flush=True)
     return ok
@@ -504,9 +511,10 @@ def fallback_run(now=time.time):
         latest = max((_epoch(r["created_at"]) for r in runs), default=None) if runs is not None else None
     except (TypeError, KeyError, ValueError, AttributeError):
         runs, latest = None, None
-    if runs is None:
-        print(f"{time.strftime('%F %T')} fallback: dispatch state unknown, running", flush=True)
-    elif latest is not None and now() - latest < FALLBACK_QUIET:
+    if runs is None:  # fail closed: cannot tell whether minute owners are active
+        print(f"{time.strftime('%F %T')} fallback skipped: dispatch state unknown", flush=True)
+        return
+    if latest is not None and now() - latest < FALLBACK_QUIET:
         print(f"{time.strftime('%F %T')} fallback not needed: dispatch active", flush=True)
         return
     rb = remote_blocked()

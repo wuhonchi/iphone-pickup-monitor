@@ -196,7 +196,7 @@ for rc, want_flag in ((1, True), (0, False)):
     os.environ.pop("GITHUB_ACTIONS"); monitor.subprocess.run = REAL_SUBPROCESS_RUN
     paused = [t for t in sent if "paused" in t]
     check(f"M15 git rc={rc}: push_blocked={ret}, notification {'has' if want_flag else 'lacks'} '(.blocked push FAILED)'",
-          ret is (rc == 0) and len(paused) == 1 and (("(.blocked push FAILED)" in paused[0]) == want_flag) and len(git) == 8,
+          ret is (rc == 0) and len(paused) == 1 and (("(.blocked push FAILED)" in paused[0]) == want_flag) and len(git) == (8 if rc == 0 else 2),  # add fails -> stop early
           f"ret={ret} paused={paused} git_cmds={len(git)}")
 
 # Fake GitHub API for M16-M18
@@ -241,7 +241,7 @@ for name, resp in (("HTTP 500", (500, None)), ("no network", (None, None)), ("ma
     out = io.StringIO()
     with contextlib.redirect_stdout(out):
         got = monitor.resolve_owned_start()
-    check(f"M17c listing failure ({name}) -> proceed, logged", got == T0_EPOCH - 30 + 60 and "duplicate check unknown" in out.getvalue(), f"got={got}")
+    check(f"M17c listing failure ({name}) -> skip (fail closed), logged", got is None and "duplicate check unknown" in out.getvalue(), f"got={got}")
 
 # M18 (4): --fallback
 monitor.GAP = 0
@@ -267,7 +267,7 @@ check("M18d shared .blocked -> skipped", n == 0 and "fallback skipped" in log, l
 n, _, log = fb(600, None)
 check("M18e block state unknown -> skipped", n == 0 and "fallback skipped: block state unknown" in log, log.strip())
 n, _, log = fb(None, False, listing=(None, None))
-check("M18f listing failed -> runs one pass (logged unknown)", n == 3 and "dispatch state unknown" in log, log.strip())
+check("M18f listing failed -> skipped (fail closed), logged", n == 0 and "dispatch state unknown" in log, log.strip())
 os.environ.pop("GITHUB_RUN_ID")
 
 failed = [n for n, ok in results if not ok]

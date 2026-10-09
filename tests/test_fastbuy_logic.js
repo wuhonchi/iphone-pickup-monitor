@@ -129,7 +129,7 @@ test("first unit never uses the direct GET (source: product-page step has no GET
   assert.ok(step1.length > 200, "product step block found");
   assert.ok(!/atbUrl|atbToken|location\.href/.test(step1), "no GET add / navigation in the product step");
   assert.ok(/atb1: "ui"/.test(step1));
-  assert.ok(/click\(atb\)/.test(step1), "clicks Add to Bag");
+  assert.ok(/click(Owned)?\(atb\)/.test(step1), "clicks Add to Bag");
   assert.ok(/e && !e\.disabled \? e : null/.test(step1), "waits for an enabled Add to Bag");
   // the only GET-add builder call sits in onAttach (2nd unit)
   assert.strictEqual(SRC.split("atbUrl(").length - 1, 2); // definition + onAttach
@@ -162,9 +162,9 @@ test("checkout/start landing outcomes", () => {
 
 // ---- v0.13/v0.14 safety ----
 
-test("FAST_CHECKOUT is off by default and @version is 0.15", () => {
+test("FAST_CHECKOUT is off by default and @version is 0.16", () => {
   assert.match(SRC, /^const FAST_CHECKOUT = false;/m);
-  assert.match(SRC, /^\/\/ @version\s+0\.15$/m);
+  assert.match(SRC, /^\/\/ @version\s+0\.16$/m);
 });
 
 test("owner id: random, and guarded writes need the stored owner to match", () => {
@@ -350,13 +350,13 @@ test("chooseSlot: only slots within 2h -> the latest", () => {
 test("chooseSlot: later day ignores the 2h rule", () => {
   const v = ["10-10:00-10:15", "10-12:00-12:15"];
   assert.strictEqual(L.chooseSlot(v, false, m("23:00")), "10-10:00-10:15");
-  assert.strictEqual(L.chooseSlot(v, true, m("23:00")), "10-12:00-12:15"); // same values as today -> latest
+  assert.strictEqual(L.chooseSlot(v, true, m("23:00")), null); // as today these already started -> none
 });
-test("chooseSlot: now+2h past midnight -> nothing qualifies for rule 2 -> latest", () => {
-  const v = ["9-18:00-18:15", "9-18:30-18:45"];
-  assert.strictEqual(L.chooseSlot(v, true, m("22:30")), "9-18:30-18:45");
-  // 19:00+ still wins over everything
-  assert.strictEqual(L.chooseSlot(["9-18:00-18:15", "9-21:00-21:15"], true, m("22:30")), "9-21:00-21:15");
+test("chooseSlot: slots that already started are never chosen (review round 12)", () => {
+  assert.strictEqual(L.chooseSlot(["9-18:00-18:15", "9-18:30-18:45"], true, m("22:30")), null);
+  assert.strictEqual(L.chooseSlot(["9-18:00-18:15", "9-21:00-21:15"], true, m("22:30")), null);
+  // still-future 19:00+ slot wins
+  assert.strictEqual(L.chooseSlot(["9-18:00-18:15", "9-21:00-21:15"], true, m("20:30")), "9-21:00-21:15");
 });
 test("chooseSlot: empty / junk -> null", () => {
   assert.strictEqual(L.chooseSlot([], true, 0), null);
@@ -384,6 +384,33 @@ test("never-click guards still present (source check)", () => {
   assert.ok(/apple\\s\*pay/.test(SRC));
   // the only Apple Pay control ever clicked is the bag's checkout entry, and only on www.apple.com/.../shop/bag
   assert.ok(SRC.includes('autom === BAG_APPLE_PAY_CHECKOUT && location.hostname === "www.apple.com"'));
+});
+
+test("chooseSlot absolute time: never a past slot; 2h rule across midnight; day offset", () => {
+  // now 18:00, only today 10:00 left -> already started -> null (round-12 counterexample 1)
+  assert.strictEqual(L.chooseSlot(["10-10:00-10:15"], 0, 18 * 60), null);
+  // now 23:30, tomorrow 00:30 and 02:00: 00:30 is only 1h away -> pick 02:00 (counterexample 2)
+  assert.strictEqual(L.chooseSlot(["11-00:30-00:45", "11-02:00-02:15"], 1440, 23 * 60 + 30), "11-02:00-02:15");
+  // now 23:30, tomorrow only 00:30 -> within 2h -> latest remaining = 00:30
+  assert.strictEqual(L.chooseSlot(["11-00:30-00:45"], 1440, 23 * 60 + 30), "11-00:30-00:45");
+  // 19:00+ still wins on a later day
+  assert.strictEqual(L.chooseSlot(["11-11:00-11:15", "11-19:30-19:45"], 1440, 10 * 60), "11-19:30-19:45");
+  // dayOffsetMinutes: same day 0, next day 1440, month wrap 31 -> 1
+  const at = (y, mo, d, h) => Date.UTC(y, mo, d, h - 8);
+  assert.strictEqual(L.dayOffsetMinutes(10, at(2026, 9, 10, 9)), 0);
+  assert.strictEqual(L.dayOffsetMinutes(11, at(2026, 9, 10, 9)), 1440);
+  assert.strictEqual(L.dayOffsetMinutes(1, at(2026, 9, 31, 23)), 1440);
+  assert.strictEqual(L.dayOffsetMinutes(25, at(2026, 9, 10, 9)), null);
+});
+
+test("bag Apple Pay entry only on exactly /hk/shop/bag", () => {
+  assert.ok(SRC.includes('location.pathname === "/hk/shop/bag"'));
+  assert.ok(!/\/shop\\\/bag\$\/\.test\(location\.pathname\)/.test(SRC));
+});
+
+test("flow-advancing clicks re-check ownership", () => {
+  assert.ok(SRC.includes("const clickOwned = async (el)"));
+  for (const v of ["atb", "btn", "guest", "pick", "cont"]) assert.ok(SRC.includes(`await clickOwned(${v})`), v);
 });
 
 console.log(passed + " tests passed");
