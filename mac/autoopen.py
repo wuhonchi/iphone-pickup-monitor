@@ -18,7 +18,7 @@ ENV = _here if _here.exists() else Path("/Users/wuhonchi/Documents/iphone/.env")
 PREFIXES = ["https://www.apple.com/hk/shop/"]
 if os.environ.get("AUTOOPEN_TEST_URL_PREFIX"):
     PREFIXES.append(os.environ["AUTOOPEN_TEST_URL_PREFIX"])
-DEDUP_SEC = 60
+RATE_SEC = 90     # open at most ONE link per this many seconds (global, any URL): one checkout flow at a time
 MAX_AGE = 120     # on reconnect, skip messages older than this (stale stock)
 READ_TIMEOUT = 90  # ntfy sends a keepalive every ~45 s; silence longer than this = dead connection
 
@@ -41,11 +41,51 @@ def allowed(url):
             and not any(c.isspace() for c in url))
 
 
+def decide(url, age, now, last_open):
+    """Return (action, reason) for one message. action: "open" | "ignore" | "skip"."""
+    if not allowed(url):
+        return "ignore", f"ignored (not an allowed link): {url[:80]!r}"
+    if age > MAX_AGE:
+        return "ignore", f"ignored (stale {age:.0f}s): {url}"
+    if last_open is not None and now - last_open < RATE_SEC:
+        return "skip", f"skipped: another flow started {now - last_open:.0f}s ago: {url}"
+    return "open", ""
+
+
+def open_in_safari(url, run=subprocess.run):
+    """Run `open -a Safari <url>`; return (ok, detail)."""
+    try:
+        r = run(["open", "-a", "Safari", url], timeout=10)
+    except Exception as e:
+        return False, repr(e)
+    rc = getattr(r, "returncode", None)
+    return rc == 0, f"exit {rc}"
+
+
+def handle(ev, state, now=None, run=subprocess.run, logf=None):
+    """Process one ntfy message event. state = {"last_open": float|None}. Returns the action taken."""
+    logf = logf or log
+    now = time.time() if now is None else now
+    url = (ev.get("message") or "").strip()
+    age = now - ev.get("time", now)
+    action, reason = decide(url, age, now, state.get("last_open"))
+    if action != "open":
+        logf(reason)
+        return action
+    ok, detail = open_in_safari(url, run)
+    if ok:
+        state["last_open"] = now
+        logf(f"opened in Safari ({age:.1f}s after publish) [{ev.get('title', '')}]: {url}")
+        return "opened"
+    logf(f"FAILED to open in Safari ({detail}): {url}")
+    return "failed"
+
+
 def main():
     topic = read_topic()
     if not topic:
         sys.exit("NTFY_TOPIC not found in .env")
-    opened = {}  # url -> last open time
+    state = {"last_open": None}
     last_id, backoff = None, 1
     log(f"listening (allowed prefixes: {', '.join(PREFIXES)})")
     while True:
@@ -60,18 +100,7 @@ def main():
                     if ev.get("event") != "message":
                         continue
                     last_id = ev.get("id") or last_id
-                    url = (ev.get("message") or "").strip()
-                    age = time.time() - ev.get("time", time.time())
-                    if not allowed(url):
-                        log(f"ignored (not an allowed link): {url[:80]!r}")
-                    elif age > MAX_AGE:
-                        log(f"ignored (stale {age:.0f}s): {url}")
-                    elif time.time() - opened.get(url, 0) < DEDUP_SEC:
-                        log(f"ignored (duplicate within {DEDUP_SEC}s): {url}")
-                    else:
-                        opened[url] = time.time()
-                        subprocess.run(["open", "-a", "Safari", url], timeout=10)
-                        log(f"opened in Safari ({age:.1f}s after publish) [{ev.get('title', '')}]: {url}")
+                    handle(ev, state)
                 raise ConnectionError("stream closed by server")
         except KeyboardInterrupt:
             return
