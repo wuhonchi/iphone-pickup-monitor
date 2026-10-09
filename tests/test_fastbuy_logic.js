@@ -409,8 +409,9 @@ test("bag Apple Pay entry only on exactly /hk/shop/bag", () => {
 });
 
 test("flow-advancing clicks re-check ownership", () => {
-  assert.ok(SRC.includes("const clickOwned = async (el)"));
-  for (const v of ["atb", "btn", "guest", "pick", "cont"]) assert.ok(SRC.includes(`await clickOwned(${v})`), v);
+  assert.ok(SRC.includes("const clickOwned = async (el, verify)"));
+  for (const v of ["atb", "btn", "guest", "pick"]) assert.ok(SRC.includes(`await clickOwned(${v})`), v);
+  assert.ok(SRC.includes("await clickOwned(cont, verifyBeforeContinue)"), "cont");
 });
 
 test("seconds count: 18:00:59 is after an 18:00 slot (review round 13)", () => {
