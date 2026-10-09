@@ -164,9 +164,9 @@ test("checkout/start landing outcomes", () => {
 
 // ---- v0.13/v0.14 safety ----
 
-test("FAST_CHECKOUT is off by default and @version is 0.22", () => {
+test("FAST_CHECKOUT is off by default and @version is 0.23", () => {
   assert.match(SRC, /^const FAST_CHECKOUT = false;/m);
-  assert.match(SRC, /^\/\/ @version\s+0\.22$/m);
+  assert.match(SRC, /^\/\/ @version\s+0\.23$/m);
 });
 
 test("owner id: random, and guarded writes need the stored owner to match", () => {
@@ -607,4 +607,67 @@ test("arming block (real source, fake GM): checkBag deletes the old state and ad
   // nothing added -> fresh product flow with a new owner
   r = await run({ ts: now - 3000, owner: "old", armedPart: "MJXV4ZA/A", stage: "product" }, "?product=MJXX4ZA%2FA");
   assert.strictEqual(r.state.stage, "product"); assert.strictEqual(r.state.armedPart, "MJXX4ZA/A"); assert.notStrictEqual(r.state.owner, "old");
-});Promise.all(pending).then(() => console.log(passed + " tests passed"));
+});
+// Cross-tab behaviour with the real helper sources (review round 19 must-add tests).
+const srcBlock = (re) => { const m = SRC.match(re); assert.ok(m, String(re)); return m[0]; };
+const helperSrc = () => [
+  srcBlock(/const clearTab = \(\) => \{[\s\S]*?\n  \};/),
+  srcBlock(/const disarm = async \(\) => \{[\s\S]*?\n  \};/),
+  srcBlock(/const assertOwned = async \(\) => \{[\s\S]*?\n  \};/),
+  srcBlock(/const clickOwned = async \(el, verify\) => \{[\s\S]*?\n  \};/),
+  srcBlock(/const setOwned = async \(el, proto, value, events, verify\) => \{[\s\S]*?\n  \};/),
+  srcBlock(/const navOwned = async \(url, verify\) => \{[\s\S]*?\n  \};/),
+].join("\n");
+const oldTab = (getStore, setStore) => {
+  const win = { name: L.tabName("old") };
+  const acts = [];
+  const GM = { getValue: async () => getStore(), deleteValue: async () => setStore(null) };
+  const load = async () => JSON.parse(getStore() || "null");
+  const location = { set href(u) { acts.push("nav " + u); } };
+  const h = new Function("L", "window", "GM", "hasGM", "load", "myOwner", "click", "setNative", "location", "KEY",
+    helperSrc() + "\nreturn { disarm, clickOwned, setOwned, navOwned };")(
+    L, win, GM, true, load, "old", () => acts.push("click"), () => acts.push("set"), location, "fastbuy");
+  return { h, win, acts };
+};
+
+test("takeover: every later action of the old tab is refused and its catch never deletes the new state (round 19)", async () => {
+  // new flow took over (owner "new") while the old tab was between next() and Add to Bag / at checkout / Continue / contact
+  let store = JSON.stringify({ owner: "new", armedPart: "MJXV4ZA/A", stage: "bag", ts: Date.now() });
+  const { h, win, acts } = oldTab(() => store, (v) => { store = v; });
+  for (const act of [() => h.clickOwned({}), () => h.navOwned("/hk/shop/bag"), () => h.setOwned({}, {}, "x", [])]) {
+    await assert.rejects(act(), /另一個流程接手/);
+  }
+  assert.deepStrictEqual(acts, []); // C4: old Add to Bag click, 2nd-unit GET, Continue, contact writes all refused
+  await h.disarm(); // the old tab's top-level catch
+  assert.strictEqual(JSON.parse(store).owner, "new", "new state kept");
+  assert.strictEqual(win.name, "", "old tab unbound");
+});
+
+test("checkBag takeover: delayed old add / navigation finds no state and does nothing (round 19)", async () => {
+  let store = null; // checkBag deleted the state
+  const { h, acts } = oldTab(() => store, (v) => { store = v; });
+  await assert.rejects(h.navOwned("https://www.apple.com/hk/shop/buy-iphone/x?product=MJXV4ZA%2FA&atbtoken=t"));
+  await assert.rejects(h.clickOwned({}));
+  assert.deepStrictEqual(acts, []);
+  assert.strictEqual(store, null);
+});
+
+test("verifyBeforeCheckout (real source): only exactly 2 lines of the target model pass (round 19)", () => {
+  const body = extractFn("verifyBeforeCheckout");
+  const N = "iPhone 18 Pro Max 512GB Burgundy";
+  const why = (d) => "stop:" + (d.reason || d.kind);
+  const run = (names, btn = { isConnected: true, disabled: false }) =>
+    new Function("L", "lines", "lineName", "st", "QTY", "why", "btn", "return " + body)(
+      L, () => names, (x) => x, { name: N }, "2", why, btn)();
+  run([N, N]); // ok
+  for (const bad of [[], [N], [N, N, N], [N, N, "MagSafe Charger"], [N, "iPhone 18 Pro Max 1TB Black"]]) assert.throws(() => run(bad), /stop:/, JSON.stringify(bad));
+  assert.throws(() => run([N, N], { isConnected: false, disabled: false }), /Check Out/);
+});
+
+test("legacy added state without owner/armedPart -> checkBag, never fresh-add (round 19)", () => {
+  const now = 1e12, TTL = 5 * 60 * 1000;
+  assert.strictEqual(L.armDecision("R499", { ts: now - 1000, atb1: "ui", part: "MJXV4ZA/A" }, now, TTL, "MJXX4ZA/A").kind, "checkBag");
+  assert.strictEqual(L.armDecision("R499", { ts: now - TTL - 5, atb1: "ui" }, now, TTL, "MJXV4ZA/A").kind, "checkBag");
+  assert.strictEqual(L.armDecision("R499", { ts: now - 1000, stage: "product" }, now, TTL, "MJXV4ZA/A").kind, "arm");
+});
+Promise.all(pending).then(() => console.log(passed + " tests passed"));
