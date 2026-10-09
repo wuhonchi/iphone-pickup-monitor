@@ -13,7 +13,7 @@ It does not retry around blocks.
   python3 monitor.py --once     # one cycle, print result
   python3 monitor.py --cron     # one cycle with saved state (for crontab)
   python3 monitor.py --minute   # GitHub Actions dispatch: own one wall-clock minute
-  python3 monitor.py --fallback # GitHub Actions schedule: single pass only if no dispatch is active
+  python3 monitor.py --fallback # GitHub Actions schedule: watchdog only (no Apple request); alerts if no dispatch ran recently
 """
 import calendar, concurrent.futures, fcntl, json, os, queue, threading, random, subprocess, sys, time, urllib.error, urllib.parse, urllib.request
 from pathlib import Path

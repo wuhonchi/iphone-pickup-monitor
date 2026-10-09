@@ -8,10 +8,12 @@ const L = require(path.join(__dirname, "..", "fastbuy.user.js"));
 const SRC = fs.readFileSync(path.join(__dirname, "..", "fastbuy.user.js"), "utf8");
 
 let passed = 0;
+const pending = [];
 function test(name, fn) {
-  fn();
-  passed++;
-  console.log("ok -", name);
+  const r = fn();
+  const done = () => { passed++; console.log("ok -", name); };
+  if (r && typeof r.then === "function") pending.push(r.then(done));
+  else done();
 }
 
 const m = (hhmm) => Number(hhmm.slice(0, 2)) * 60 + Number(hhmm.slice(3));
@@ -129,7 +131,7 @@ test("first unit never uses the direct GET (source: product-page step has no GET
   assert.ok(step1.length > 200, "product step block found");
   assert.ok(!/atbUrl|atbToken|location\.href/.test(step1), "no GET add / navigation in the product step");
   assert.ok(/atb1: "ui"/.test(step1));
-  assert.ok(/click(Owned)?\(atb\)/.test(step1), "clicks Add to Bag");
+  assert.ok(/clickOwned\(atb, verifyBeforeAtb\)/.test(step1), "clicks Add to Bag");
   assert.ok(/e && !e\.disabled \? e : null/.test(step1), "waits for an enabled Add to Bag");
   // the only GET-add builder call sits in onAttach (2nd unit)
   assert.strictEqual(SRC.split("atbUrl(").length - 1, 2); // definition + onAttach
@@ -162,9 +164,9 @@ test("checkout/start landing outcomes", () => {
 
 // ---- v0.13/v0.14 safety ----
 
-test("FAST_CHECKOUT is off by default and @version is 0.18", () => {
+test("FAST_CHECKOUT is off by default and @version is 0.19", () => {
   assert.match(SRC, /^const FAST_CHECKOUT = false;/m);
-  assert.match(SRC, /^\/\/ @version\s+0\.18$/m);
+  assert.match(SRC, /^\/\/ @version\s+0\.19$/m);
 });
 
 test("owner id: random, and guarded writes need the stored owner to match", () => {
@@ -410,7 +412,9 @@ test("bag Apple Pay entry only on exactly /hk/shop/bag", () => {
 
 test("flow-advancing clicks re-check ownership", () => {
   assert.ok(SRC.includes("const clickOwned = async (el, verify)"));
-  for (const v of ["atb", "btn", "guest", "pick"]) assert.ok(SRC.includes(`await clickOwned(${v})`), v);
+  for (const v of ["guest", "pick"]) assert.ok(SRC.includes(`await clickOwned(${v})`), v);
+  assert.ok(SRC.includes("await clickOwned(atb, verifyBeforeAtb)"), "atb");
+  assert.ok(SRC.includes("await clickOwned(btn, verifyBeforeCheckout)"), "btn");
   assert.ok(SRC.includes("await clickOwned(cont, verifyBeforeContinue)"), "cont");
 });
 
@@ -436,4 +440,40 @@ test("Continue: slot/store/day verified synchronously after the async owner read
   clock += 200; // async owner read
   assert.throws(() => verify(), /started/);
 });
-console.log(passed + " tests passed");
+test("Add to Bag / Check Out: DOM changes during the async owner read stop the click (review round 15)", () => {
+  // Extract the real clickOwned and run it with a load() that mutates the page while it is pending.
+  const m = SRC.match(/const clickOwned = async \(el, verify\) => \{[\s\S]*?\n  \};/);
+  assert.ok(m, "clickOwned source");
+  const run = async (mutate, verify) => {
+    let clicked = 0;
+    const owner = "o1";
+    const fn = new Function("L", "window", "myOwner", "load", "click", "return " + m[0].replace(/^const clickOwned = /, "").replace(/;$/, ""));
+    const clickOwned = fn(
+      { tabOwner: () => owner, ownerMatches: () => true }, { name: "x" }, owner,
+      async () => { mutate(); return {}; }, () => { clicked++; }
+    );
+    let err = null;
+    try { await clickOwned({}, verify); } catch (e) { err = e; }
+    return { clicked, err };
+  };
+  // Add to Bag: model flips from 512GB Burgundy to 1TB Black during the owner read -> no click.
+  return (async () => {
+    let part = "MJXV4ZA/A";
+    const vAtb = () => { if (!L.productMatches("MJXV4ZA/A", part)) throw new Error("model"); };
+    let r = await run(() => { part = "MJXX4ZA/A"; }, vAtb);
+    assert.strictEqual(r.clicked, 0); assert.match(r.err.message, /model/);
+    part = "MJXV4ZA/A";
+    r = await run(() => {}, vAtb);
+    assert.strictEqual(r.clicked, 1);
+    // Check Out: an accessory appears in the bag during the owner read -> no click.
+    const name = "iPhone 18 Pro Max 512GB Burgundy";
+    let bag = [name, name];
+    const vBag = () => { const d = L.bagDecision(bag, name, 2); if (d.kind !== "ok") throw new Error(d.reason); };
+    r = await run(() => { bag = [name, name, "MagSafe Charger"]; }, vBag);
+    assert.strictEqual(r.clicked, 0); assert.ok(r.err);
+    bag = [name, name];
+    r = await run(() => {}, vBag);
+    assert.strictEqual(r.clicked, 1);
+  })();
+});
+Promise.all(pending).then(() => console.log(passed + " tests passed"));

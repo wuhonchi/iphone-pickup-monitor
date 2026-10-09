@@ -42,8 +42,8 @@ jobs:
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}
           GITHUB_TOKEN: ${{ github.token }}
-          # schedule (*/30 fallback, --fallback -> single cron_run pass): never burst, so it does a single pass and cannot overlap
-          # the minute-owner runs for 270 s. start == end means "never" (monitor.in_burst_window).
+          # schedule (--fallback watchdog): never polls Apple; BURST_WINDOW is unused there. start == end means "never"
+          # (monitor.in_burst_window).
           BURST_WINDOW: ${{ github.event_name == 'schedule' && '00:00-00:00' || (inputs.burst_window || vars.BURST_WINDOW || '07:00-09:30') }}
         run: python3 monitor.py ${{ inputs.selftest && '--selftest' || (github.event_name == 'workflow_dispatch' && '--minute' || '--fallback') }}
 
