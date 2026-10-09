@@ -162,7 +162,7 @@ test("checkout/start landing outcomes", () => {
 
 // ---- v0.13/v0.14 safety ----
 
-test("FAST_CHECKOUT is off by default and @version is 0.14", () => {
+test("FAST_CHECKOUT is off by default and @version is 0.15", () => {
   assert.match(SRC, /^const FAST_CHECKOUT = false;/m);
   assert.match(SRC, /^\/\/ @version\s+0\.15$/m);
 });
