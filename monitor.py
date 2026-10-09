@@ -30,13 +30,14 @@ def buy_url(cap, part, color="burgundy"):
 
 # iPhone 18 Pro Max (part numbers from apple.com/hk iPhone 18 Pro page source)
 TARGETS = {
-    "MJXQ4ZA/A": ("256GB Burgundy", buy_url("256gb", "MJXQ4ZA/A")),
     "MJXV4ZA/A": ("512GB Burgundy", buy_url("512gb", "MJXV4ZA/A")),
     "MJY04ZA/A": ("1TB Burgundy", buy_url("1tb", "MJY04ZA/A")),
-    "MJXN4ZA/A": ("256GB Black", buy_url("256gb", "MJXN4ZA/A", "black")),
+    "MJXT4ZA/A": ("512GB Black", buy_url("512gb", "MJXT4ZA/A", "black")),
+    "MJXX4ZA/A": ("1TB Black", buy_url("1tb", "MJXX4ZA/A", "black")),
 }
-# Each query hides its own product, so query every target plus non-target Pro Max parts.
-QUERIES = list(TARGETS) + ["MJY44ZA/A", "MJXP4ZA/A"]  # 2TB Burgundy, 256GB Silver
+# Each query hides its own product, so query every target plus two non-target Pro Max helper parts
+# (they are never alerted on; they only widen the recommendation lists).
+QUERIES = list(TARGETS) + ["MJY44ZA/A", "MJXQ4ZA/A"]  # helpers: 2TB Burgundy, 256GB Burgundy
 
 INTERVAL = int(os.environ.get("INTERVAL_SEC", "180"))
 GAP = 3  # seconds between the requests inside one cycle (sequential mode)
@@ -134,6 +135,8 @@ def in_burst_window(now=None):
     hkt = time.gmtime((now or time.time()) + 8 * 3600)
     hm = f"{hkt.tm_hour:02d}:{hkt.tm_min:02d}"
     start, end = BURST_WINDOW.split("-")
+    if start == end:  # e.g. "00:00-00:00" = never (used for the */30 schedule fallback)
+        return False
     return start <= hm < end
 
 
@@ -284,12 +287,18 @@ def run_created_epoch():
         status, body = _gh_api(f"actions/runs/{rid}")
         if status == 200 and body and body.get("created_at"):
             return calendar.timegm(time.strptime(body["created_at"], "%Y-%m-%dT%H:%M:%SZ"))
+    print(f"{time.strftime('%F %T')} created_at unknown, using now", flush=True)
     return time.time()
 
 
 def remote_blocked():
+    """True = shared .blocked exists, False = confirmed absent (404), None = unknown (error / other status)."""
     status, _ = _gh_api("contents/.blocked?ref=main")
-    return status == 200
+    if status == 200:
+        return True
+    if status == 404:
+        return False
+    return None
 
 
 def push_blocked(reason):
@@ -297,7 +306,13 @@ def push_blocked(reason):
     if os.environ.get("GITHUB_ACTIONS"):
         for cmd in (["git", "add", ".blocked"], ["git", "commit", "-q", "-m", "monitor blocked"],
                     ["git", "pull", "-q", "--rebase"], ["git", "push", "-q"]):
-            subprocess.run(cmd, timeout=30)
+            try:
+                rc = subprocess.run(cmd, timeout=30).returncode
+            except Exception as e:
+                print(f"push_blocked: {' '.join(cmd)} failed: {e}", flush=True)
+                continue
+            if rc != 0:
+                print(f"push_blocked: {' '.join(cmd)} exited {rc}", flush=True)
 
 
 def fetch_all(queries, timeout):
@@ -341,8 +356,15 @@ class Notifier:
 
 
 def minute_run(owned_start=None, ticks_per_min=60 // TICK, now=time.time, sleep=time.sleep):
-    if BLOCKED_FLAG.exists() or remote_blocked():
+    if BLOCKED_FLAG.exists():
         print(f"{time.strftime('%F %T')} skipped: blocked", flush=True)
+        return
+    rb = remote_blocked()
+    if rb is True:
+        print(f"{time.strftime('%F %T')} skipped: blocked (shared .blocked)", flush=True)
+        return
+    if rb is None:
+        print(f"{time.strftime('%F %T')} skipped: block state unknown", flush=True)
         return
     try:
         prev = {tuple(x) for x in json.loads(STATE.read_text())}
@@ -359,9 +381,16 @@ def minute_run(owned_start=None, ticks_per_min=60 // TICK, now=time.time, sleep=
     def do_tick(i, t):
         if stop.is_set():
             return
-        if i % REMOTE_BLOCK_EVERY == 0 and remote_blocked():
-            stop.set()
-            print(f"tick {i} stop: shared .blocked found", flush=True)
+        if i % REMOTE_BLOCK_EVERY == 0:
+            rb = remote_blocked()
+            if rb is True:
+                stop.set()
+                print(f"tick {i} stop: shared .blocked found", flush=True)
+                return
+            if rb is None:
+                print(f"tick {i} skipped: block state unknown", flush=True)
+                return
+        if stop.is_set():  # another tick may have hit a block while we checked
             return
         t0 = now()
         try:
@@ -381,6 +410,7 @@ def minute_run(owned_start=None, ticks_per_min=60 // TICK, now=time.time, sleep=
             if not errors:  # only a complete scan may mark items as gone
                 last_seen["found"] = found
         if new:
+            # ntfy failure is only logged; a failed Telegram send keeps the item 'new' so it is retried next minute.
             push_open(new)
             notifier.put(set(new), fmt(new))
         hms = time.strftime("%H:%M:%S", time.gmtime(t))

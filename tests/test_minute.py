@@ -4,6 +4,9 @@ import math, pathlib, sys, tempfile, threading, time
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 import monitor  # noqa: E402
 
+# Real values, captured before setup() replaces them with fakes.
+REAL_TARGETS, REAL_QUERIES, REAL_IN_BURST = dict(monitor.TARGETS), list(monitor.QUERIES), monitor.in_burst_window
+
 HIT = {"body": {"PickupMessage": {"stores": [{"storeName": "ifc mall", "storeNumber": "R428",
         "partsAvailability": {"T1": {"pickupDisplay": "available", "pickupSearchQuote": "Available Today"}}}]}}}
 EMPTY = {"body": {"PickupMessage": {"stores": []}}}
@@ -117,6 +120,59 @@ def flaky(q, timeout=20):
 setup(flaky)
 monitor.minute_run(owned_start=start_soon(), ticks_per_min=4)
 check("M9 transient errors: all ticks still run", len(calls) == 12, f"queries={len(calls)}")
+
+# M10: shared block state unknown on a tick check -> that tick makes no Apple request, run continues
+calls = []; rb_calls = []
+def rb10():
+    rb_calls.append(1)
+    return False if len(rb_calls) == 1 else None  # start check OK, every tick check unknown
+setup(lambda q, timeout=20: (calls.append(q), EMPTY)[1], remote_blocked=rb10)
+monitor.REMOTE_BLOCK_EVERY = 3
+monitor.minute_run(owned_start=start_soon(), ticks_per_min=6)
+check("M10 block state unknown -> ticks 0,3 skipped, ticks 1,2,4,5 still run", len(calls) == 4 * 3 and len(rb_calls) == 3, f"queries={len(calls)} rb_calls={len(rb_calls)}")
+
+# M11: shared block state unknown at run start -> whole run skipped, no Apple request, state untouched
+calls = []
+d = setup(lambda q, timeout=20: (calls.append(q), EMPTY)[1], remote_blocked=lambda: None)
+monitor.minute_run(owned_start=start_soon(), ticks_per_min=6)
+check("M11 block state unknown at start -> run skipped", len(calls) == 0 and not monitor.STATE.exists(), f"queries={len(calls)}")
+
+# M12: stop set (by another tick's Blocked) while a tick is in its remote check -> that tick does not fetch
+calls = []; rb_n = []; pushed.clear()
+def rb12():
+    rb_n.append(1)
+    if len(rb_n) > 1:
+        time.sleep(0.6)  # tick checks are slow; tick 1 is still checking when tick 0 hits a block
+    return False
+def fetch12(q, timeout=20):
+    calls.append((q, time.time()))
+    if q == "b":
+        time.sleep(0.8); raise monitor.Blocked("HTTP 541")
+    return EMPTY
+setup(fetch12, remote_blocked=rb12)
+monitor.REMOTE_BLOCK_EVERY = 1
+s0 = start_soon(); monitor.minute_run(owned_start=s0, ticks_per_min=6)
+monitor.REMOTE_BLOCK_EVERY = 3
+check("M12 stop set mid-minute -> no later tick starts a fetch", len(calls) == 3 and len(pushed) == 1 and all(t < s0 + 1 for _, t in calls), f"queries={len(calls)} pushed={len(pushed)}")
+
+# M13: start == end burst window is never active (used by the */30 schedule fallback)
+monitor.in_burst_window = REAL_IN_BURST
+monitor.BURST_WINDOW = "00:00-00:00"
+day0 = 1760000000 - 1760000000 % 86400  # a UTC midnight
+never = not any(monitor.in_burst_window(day0 + m * 60) for m in range(0, 1440))
+monitor.BURST_WINDOW = "07:00-09:30"
+normal = monitor.in_burst_window(day0 + 0 * 3600) and not monitor.in_burst_window(day0 + 2 * 3600)  # 08:00 / 10:00 HKT
+check("M13 BURST_WINDOW 00:00-00:00 never true; 07:00-09:30 still works", never and normal)
+
+# M14: target / query composition
+want = {"MJXV4ZA/A": ("512GB Burgundy", "512gb", "burgundy"), "MJY04ZA/A": ("1TB Burgundy", "1tb", "burgundy"),
+        "MJXT4ZA/A": ("512GB Black", "512gb", "black"), "MJXX4ZA/A": ("1TB Black", "1tb", "black")}
+ok_t = set(REAL_TARGETS) == set(want) and all(
+    REAL_TARGETS[p][0] == lab and f"-{cap}-{col}?" in REAL_TARGETS[p][1] and "product=" + p.replace("/", "%2F") in REAL_TARGETS[p][1]
+    for p, (lab, cap, col) in want.items())
+ok_q = (len(REAL_QUERIES) == 6 and len(set(REAL_QUERIES)) == 6 and set(REAL_TARGETS) <= set(REAL_QUERIES)
+        and set(REAL_QUERIES) - set(REAL_TARGETS) == {"MJY44ZA/A", "MJXQ4ZA/A"})
+check("M14 4 targets w/ right labels+links; 6 unique queries incl. every target + 2 helpers", ok_t and ok_q, f"targets={sorted(REAL_TARGETS)} queries={REAL_QUERIES}")
 
 failed = [n for n, ok in results if not ok]
 print(f"\n{len(results) - len(failed)}/{len(results)} passed")

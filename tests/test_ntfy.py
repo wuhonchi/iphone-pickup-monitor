@@ -25,16 +25,16 @@ def run(found, topic="t-test"):
 
 
 two = {("MJXV4ZA/A", "Causeway Bay"): ("512GB Burgundy", "Today", "R428"),
-       ("MJXQ4ZA/A", "IFC Mall"): ("256GB Burgundy", "Today", "R485")}
+       ("MJXT4ZA/A", "IFC Mall"): ("512GB Black", "Today", "R485")}
 s = run(two)
 check("one message for several new items", len(s) == 1)
 url, body, title, timeout = s[0]
 check("posts to ntfy topic", url == "https://ntfy.sh/t-test")
-check("body = first item's #fastbuy link (fmt order)", body == monitor.TARGETS["MJXQ4ZA/A"][1] + "#fastbuy=R485")
-check("title = model @ store", title == "256GB Burgundy @ IFC Mall")
+check("body = first item's #fastbuy link (fmt order)", body == monitor.TARGETS["MJXT4ZA/A"][1] + "#fastbuy=R485")
+check("title = model @ store", title == "512GB Black @ IFC Mall")
 check("timeout <= 2s", timeout == 2)
 check("no topic -> nothing sent", run(two, topic=None) == [])
-check("no store number -> nothing sent", run({("MJXQ4ZA/A", "IFC Mall"): ("256GB Burgundy", "Today", "")}) == [])
+check("no store number -> nothing sent", run({("MJXT4ZA/A", "IFC Mall"): ("512GB Black", "Today", "")}) == [])
 monitor.urllib.request.urlopen = lambda *a, **k: (_ for _ in ()).throw(OSError("down"))
 try:
     run(two); check("network error swallowed", True)
