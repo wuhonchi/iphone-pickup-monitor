@@ -162,9 +162,9 @@ test("checkout/start landing outcomes", () => {
 
 // ---- v0.13/v0.14 safety ----
 
-test("FAST_CHECKOUT is off by default and @version is 0.17", () => {
+test("FAST_CHECKOUT is off by default and @version is 0.18", () => {
   assert.match(SRC, /^const FAST_CHECKOUT = false;/m);
-  assert.match(SRC, /^\/\/ @version\s+0\.17$/m);
+  assert.match(SRC, /^\/\/ @version\s+0\.18$/m);
 });
 
 test("owner id: random, and guarded writes need the stored owner to match", () => {
@@ -422,5 +422,17 @@ test("seconds count: 18:00:59 is after an 18:00 slot (review round 13)", () => {
   assert.strictEqual(L.slotStarted("10-18:00-18:15", at(18, 0, 0)), true);
   assert.strictEqual(L.slotStarted("11-00:30-00:45", at(23, 30, 0)), false); // tomorrow
   assert.ok(SRC.includes("if (L.slotStarted(slotChoice, Date.now()))"), "re-checked right before Continue");
+});
+test("Continue: slot/store/day verified synchronously after the async owner read (review round 14)", () => {
+  // the verify callback runs after `await load()` and right before click, with no await in between
+  assert.ok(/if \(L\.tabOwner\(window\.name\) !== myOwner \|\| !L\.ownerMatches\(await load\(\), myOwner\)\)[^\n]*\n\s*if \(verify\) verify\(\);\n\s*click\(el\);/.test(SRC));
+  assert.ok(SRC.includes("await clickOwned(cont, verifyBeforeContinue)"));
+  // simulate: check passes at 17:59:59.900, GM read takes 200 ms, click happens at 18:00:00.100 -> must refuse
+  const at = (h, mi, se, ms) => Date.UTC(2026, 9, 10, h - 8, mi, se, ms);
+  let clock = at(17, 59, 59, 900);
+  const verify = () => { if (L.slotStarted("10-18:00-18:15", clock)) throw new Error("started"); };
+  verify(); // fail-fast check passes
+  clock += 200; // async owner read
+  assert.throws(() => verify(), /started/);
 });
 console.log(passed + " tests passed");

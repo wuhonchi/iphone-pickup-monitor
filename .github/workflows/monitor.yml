@@ -3,8 +3,8 @@ name: iphone-pickup-monitor
 # cron-job.org dispatches this every minute. Each dispatched run owns the NEXT wall-clock minute
 # and checks every 5 s (07:00-09:30 HKT) or once (other times). Runs are NOT queued: the next one
 # warms up while the current one is still checking, so there is no hand-off gap.
-# The schedule below is only a slow fallback in case cron-job.org stops (--fallback: exits if a
-# dispatch run was created in the last 180 s or the shared .blocked is set/unknown; else one pass).
+# The schedule below is a watchdog (--fallback): it never polls Apple; if no dispatch run was
+# created in the last 180 s it sends a Telegram alert that cron-job.org seems stopped.
 on:
   workflow_dispatch:
     inputs:
