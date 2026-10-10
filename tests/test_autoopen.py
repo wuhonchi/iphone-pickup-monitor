@@ -22,7 +22,9 @@ def test(fn):
 def fake_run(rc=0, exc=None):
     calls = []
 
-    def run(cmd, timeout=None):
+    def run(cmd, timeout=None, **kw):
+        if cmd[0] == "osascript":  # no standby tab (not recorded: these tests count `open` calls)
+            return types.SimpleNamespace(returncode=0, stdout="none\n", stderr="")
         calls.append(cmd)
         if exc:
             raise exc
@@ -79,6 +81,58 @@ def not_allowed_and_stale_are_ignored():
     assert A.handle(ev(URL1, 1000 - A.MAX_AGE - 1), st, now=1000, run=run, logf=logs.append) == "ignore"
     assert calls == [] and st["last_open"] is None
 
+
+
+def osa_run(result="fired", rc=0):
+    calls = []
+
+    def run(cmd, timeout=None, **kw):
+        calls.append(cmd)
+        if cmd[0] == "osascript":
+            return types.SimpleNamespace(returncode=rc, stdout=result + "\n", stderr="")
+        return types.SimpleNamespace(returncode=0)
+    return run, calls
+
+
+@test
+def standby_tab_is_fired_instead_of_opening():
+    run, calls = osa_run("fired")
+    st = {"last_open": None}
+    assert A.handle(ev(URL1, 1000), st, now=1000.5, run=run, logf=lambda m: None) == "fired"
+    assert [c[0] for c in calls] == ["osascript"], calls  # no `open`
+    assert calls[0][3] == "[STANDBY MJXV4ZA/A]" and calls[0][4] == "#fastbuy=fire&store=R673"
+    assert st["last_open"] is None  # standby fires do not consume the open rate limit
+    # a second alert right after still fires (no 90 s limit for standby)
+    assert A.handle(ev(URL2, 1001), st, now=1001.2, run=run, logf=lambda m: None) == "fired"
+
+
+@test
+def no_standby_tab_falls_back_to_open():
+    run, calls = osa_run("none")
+    assert A.handle(ev(URL1, 1000), {"last_open": None}, now=1000.5, run=run, logf=lambda m: None) == "opened"
+    assert [c[0] for c in calls] == ["osascript", "open"]
+
+
+@test
+def osascript_error_falls_back_to_open():
+    run, calls = osa_run("", rc=1)
+    assert A.handle(ev(URL1, 1000), {"last_open": None}, now=1000.5, run=run, logf=lambda m: None) == "opened"
+
+
+@test
+def stale_or_foreign_links_never_fire():
+    run, calls = osa_run("fired")
+    assert A.handle(ev(URL1, 0), {"last_open": None}, now=1000, run=run, logf=lambda m: None) == "ignore"
+    assert A.handle(ev("https://example.com/?product=MJXV4ZA%2FA#fastbuy=R1", 1000), {"last_open": None}, now=1000, run=run, logf=lambda m: None) == "ignore"
+    assert calls == []
+
+
+@test
+def part_and_store_parsing_and_guard():
+    assert A.alert_part_store(URL1) == ("MJXV4ZA/A", "R673")
+    assert A.fire_standby(None, None)[0] == "none"
+    assert A.fire_standby('X" & do shell script "x', "R1")[0] == "none"  # only part-shaped strings reach osascript
+    assert "starts with mark" in A.FIRE_SCRIPT and 'is not running then return "none"' in A.FIRE_SCRIPT
 
 print(f"{passed} tests passed")
 sys.exit(0)

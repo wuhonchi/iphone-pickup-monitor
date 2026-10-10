@@ -164,9 +164,9 @@ test("checkout/start landing outcomes", () => {
 
 // ---- v0.13/v0.14 safety ----
 
-test("FAST_CHECKOUT is off by default and @version is 0.25", () => {
+test("FAST_CHECKOUT is off by default and @version is 0.26", () => {
   assert.match(SRC, /^const FAST_CHECKOUT = false;/m);
-  assert.match(SRC, /^\/\/ @version\s+0\.25$/m);
+  assert.match(SRC, /^\/\/ @version\s+0\.26$/m);
 });
 
 test("owner id: random, and guarded writes need the stored owner to match", () => {
@@ -677,5 +677,35 @@ test("legacy added state without owner/armedPart -> checkBag, never fresh-add (r
   assert.strictEqual(L.armDecision("R499", { ts: now - 1000, atb1: "ui", part: "MJXV4ZA/A" }, now, TTL, "MJXX4ZA/A").kind, "checkBag");
   assert.strictEqual(L.armDecision("R499", { ts: now - TTL - 5, atb1: "ui" }, now, TTL, "MJXV4ZA/A").kind, "checkBag");
   assert.strictEqual(L.armDecision("R499", { ts: now - 1000, stage: "product" }, now, TTL, "MJXV4ZA/A").kind, "arm");
+});
+test("standby (埋伏): alert links never take over a fired standby flow; expired standby does not block", () => {
+  const now = 1e12, TTL = 5 * 60 * 1000;
+  const sb = { owner: "sb", standby: true, stage: "checkout", bagChecked: true, armedPart: "MJXV4ZA/A", part: "MJXV4ZA/A", name: "512GB Burgundy" };
+  assert.strictEqual(L.armDecision("R499", { ...sb, ts: now - 1000 }, now, TTL, "MJXV4ZA/A").kind, "busy");
+  assert.strictEqual(L.armDecision("R499", { ...sb, ts: now - 1000 }, now, TTL, "MJXX4ZA/A").kind, "busy");
+  assert.strictEqual(L.armDecision("reset", { ...sb, ts: now - 1000 }, now, TTL, null).kind, "reset");
+  assert.notStrictEqual(L.armDecision("R499", { ...sb, ts: now - TTL - 1 }, now, TTL, "MJXV4ZA/A").kind, "busy");
+});
+
+test("standby (埋伏) wiring (source)", () => {
+  const sbIdx = SRC.indexOf("// ---- Standby (埋伏) mode ----");
+  assert.ok(sbIdx > 0 && sbIdx < SRC.indexOf('if (td.kind === "none") {'), "standby handled before the tab decision returns");
+  assert.ok(SRC.includes('if (onCheckoutPage && td.kind !== "act") {'));
+  // fire: state with bagChecked + standby, bound to this tab, hash stripped BEFORE reload (no double fire)
+  const fire = SRC.slice(SRC.indexOf("const sbFire = async"), SRC.indexOf("function sbWait"));
+  assert.ok(fire.includes('stage: "checkout"') && fire.includes("bagChecked: true, standby: true"));
+  assert.ok(fire.indexOf("window.name = L.tabName(owner)") < fire.indexOf("location.reload()"));
+  assert.ok(fire.indexOf("history.replaceState(null, \"\", location.pathname + location.search)") < fire.indexOf("location.reload()"));
+  assert.ok(fire.includes("if (!sb || sbFiring || !hasGM) return;"));
+  // start requires the user's explicit confirmation of the bag contents
+  assert.ok(/btn\.onclick = \(\) => \{\n\s*if \(!window\.confirm\(/.test(SRC));
+  // miss / error -> back to standby; success -> standby ends
+  assert.ok(SRC.includes('if (st.standby && sbGet()) return sbWait("上次 "'));
+  assert.ok(SRC.includes("if (st && st.standby && onCheckoutPage && sbGet()) sbWait("));
+  assert.ok(SRC.includes("if (st.standby) { sbSet(null); unmarkTitle(); }"));
+  // title marker matches the Mac agent's AppleScript mark
+  assert.ok(SRC.includes('const SB_MARK = (sb) => "[STANDBY " + sb.part + "] ";'));
+  // the payment guard is untouched: standby only reaches the contact page
+  assert.ok(SRC.includes('const FORBIDDEN_AUTOM = ["continue-button-placeOrder", "authorizePayment", "continue-button-review"];'));
 });
 Promise.all(pending).then(() => console.log(passed + " tests passed"));
