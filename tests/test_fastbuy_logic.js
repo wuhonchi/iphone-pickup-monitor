@@ -164,9 +164,9 @@ test("checkout/start landing outcomes", () => {
 
 // ---- v0.13/v0.14 safety ----
 
-test("FAST_CHECKOUT is off by default and @version is 0.27", () => {
+test("FAST_CHECKOUT is off by default and @version is 0.28", () => {
   assert.match(SRC, /^const FAST_CHECKOUT = false;/m);
-  assert.match(SRC, /^\/\/ @version\s+0\.27$/m);
+  assert.match(SRC, /^\/\/ @version\s+0\.28$/m);
 });
 
 test("owner id: random, and guarded writes need the stored owner to match", () => {
@@ -702,7 +702,7 @@ test("standby (埋伏) wiring (source)", () => {
   // miss / error -> back to standby; success -> standby ends
   assert.ok(SRC.includes('if (st.standby && sbGet()) return sbWait("上次 "'));
   assert.ok(SRC.includes("if (st && st.standby && onCheckoutPage && sbGet()) sbWait("));
-  assert.ok(SRC.includes("if (st.standby) { sbSet(null); unmarkTitle(); }"));
+  assert.ok(SRC.includes("if (st.standby) { sbSet(null); sbStop(); unmarkTitle(); }"));
   // title marker matches the Mac agent's AppleScript mark
   assert.ok(SRC.includes('const SB_MARK = (sb) => "[STANDBY " + sb.part + "] ";'));
   // the payment guard is untouched: standby only reaches the contact page
@@ -720,9 +720,53 @@ test("standby fire / contact timeout / dead page wiring (review round 23)", () =
   const fire = SRC.slice(SRC.indexOf("const sbFire = async"), SRC.indexOf("function sbWait"));
   const guard = fire.indexOf("if (L.isActive(await load(), Date.now(), TTL_MS)) return sbWait(");
   assert.ok(guard > 0 && guard < fire.indexOf("GM.setValue(KEY"), "no overwrite of a running flow");
-  assert.ok(/if \(!\(await waitFor\(\(\) => field\("firstName"\), 15000\)\)\) \{\n\s*await disarm\(\);\n\s*if \(st\.standby\) \{ sbSet\(null\); unmarkTitle\(\); \}/.test(SRC));
+  assert.ok(/if \(!\(await waitFor\(\(\) => field\("firstName"\), 15000\)\)\) \{\n\s*await disarm\(\);\n\s*if \(st\.standby\) \{ sbSet\(null\); sbStop\(\); unmarkTitle\(\); \}/.test(SRC));
   const endIdx = SRC.indexOf('if (st.standby) throw new Error("埋伏嘅 checkout 頁已經失效');
   assert.ok(endIdx > SRC.indexOf("// 5. Checkout fulfillment") && endIdx < SRC.indexOf("  } catch (e) {\n    await disarm();\n    banner(\"停低：\""));
   assert.ok(SRC.includes("【埋伏模式：付款前喺 Apple Pay 核對型號同數量"));
+});
+test("standby lifecycle (real source, fake DOM): repeated waits keep one timer set; cancel clears all; busy skip drops the fire hash (review round 24)", async () => {
+  const start = SRC.indexOf("  const SB_KEY = ");
+  const end = SRC.indexOf("  function sbPicker() {");
+  assert.ok(start > 0 && end > start);
+  const block = SRC.slice(start, end);
+  let timers = new Map(), nextId = 1, listeners = 0, replaced = [];
+  const ss = new Map();
+  const banner = { el: null };
+  const mkEl = () => { const kids = []; return { textContent: "", style: {}, kids, appendChild: (k) => kids.push(k), querySelector: () => kids[0] || null }; };
+  const document = {
+    title: "Checkout", body: { innerText: "Show Order Summary: HK$26,598" },
+    getElementById: () => banner.el, createElement: () => mkEl(),
+  };
+  const env = {
+    path: "/hk/shop/checkout", L, hasGM: true, KEY: "fastbuy", TTL_MS: 300000,
+    sessionStorage: { getItem: (k) => (ss.has(k) ? ss.get(k) : null), setItem: (k, v) => ss.set(k, v), removeItem: (k) => ss.delete(k) },
+    document,
+    setInterval: (fn) => { const id = nextId++; timers.set(id, fn); return id; },
+    clearInterval: (id) => { timers.delete(id); },
+    window: { addEventListener: () => { listeners++; }, name: "" },
+    location: { hash: "#fastbuy=fire&store=R499", pathname: "/hk/shop/checkout", search: "?_s=Fulfillment-init", reload: () => { throw new Error("must not reload when busy"); } },
+    history: { replaceState: (a, b, url) => { replaced.push(url); env.location.hash = ""; } },
+    banner: (m) => { banner.el = banner.el || mkEl(); banner.el.textContent = m; banner.el.kids.length = 0; },
+    load: async () => ({ owner: "other", ts: Date.now() }), // a running flow -> busy
+    GM: { setValue: async () => { throw new Error("must not write when busy"); } },
+  };
+  const names = Object.keys(env);
+  const api = new Function(...names, block + "\nreturn { sbWait, sbFire, sbSet, sbGet, sbStop };")(...names.map((n) => env[n]));
+  api.sbSet({ part: "MJXV4ZA/A", label: "512GB Burgundy", since: Date.now() });
+  api.sbWait();
+  api.sbWait("again");
+  assert.strictEqual(timers.size, 2, "one draw + one title timer");
+  assert.strictEqual(listeners, 1, "one hashchange listener");
+  assert.ok(document.title.startsWith("[STANDBY MJXV4ZA/A] "));
+  await api.sbFire(env.location.hash); // busy -> back to waiting, fire fragment dropped
+  assert.deepStrictEqual(replaced, ["/hk/shop/checkout?_s=Fulfillment-init"]);
+  assert.strictEqual(timers.size, 2);
+  assert.strictEqual(listeners, 1);
+  // cancel: marker gone, every timer gone, title unmarked and stays unmarked
+  banner.el.kids[0].onclick();
+  assert.strictEqual(api.sbGet(), null);
+  assert.strictEqual(timers.size, 0);
+  assert.strictEqual(document.title, "Checkout");
 });
 Promise.all(pending).then(() => console.log(passed + " tests passed"));
