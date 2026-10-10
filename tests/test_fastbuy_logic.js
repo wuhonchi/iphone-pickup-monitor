@@ -164,9 +164,9 @@ test("checkout/start landing outcomes", () => {
 
 // ---- v0.13/v0.14 safety ----
 
-test("FAST_CHECKOUT is off by default and @version is 0.24", () => {
+test("FAST_CHECKOUT is off by default and @version is 0.25", () => {
   assert.match(SRC, /^const FAST_CHECKOUT = false;/m);
-  assert.match(SRC, /^\/\/ @version\s+0\.24$/m);
+  assert.match(SRC, /^\/\/ @version\s+0\.25$/m);
 });
 
 test("owner id: random, and guarded writes need the stored owner to match", () => {
@@ -217,6 +217,9 @@ test("per-tab ownership wiring (source check)", () => {
   assert.ok(!/myOwner = st\.owner \|\| null/.test(SRC));
   assert.ok(/const td = L\.tabDecision\(st, window\.name, Date\.now\(\), TTL_MS\);/.test(SRC));
   assert.ok(SRC.includes('"fastbuy: 唔係呢個分頁嘅流程（分頁標記："'));
+  // binding is captured before clearTab(), so "屬於另一個流程" is reachable (review round 21)
+  { const ot = SRC.slice(SRC.indexOf('if (td.kind === "otherTab") {'), SRC.indexOf('if (td.kind === "otherTab") {') + 500);
+    assert.ok(ot.indexOf("const hadBinding = !!L.tabOwner(window.name);") >= 0 && ot.indexOf("const hadBinding") < ot.indexOf("clearTab()")); };
   // disarm and reset unbind the tab; save requires this tab's binding
   assert.ok(/const disarm = async \(\) => \{\s*try \{[^}]*GM\.deleteValue\(KEY\);\s*\} finally \{\s*clearTab\(\);/.test(SRC));
   assert.ok(/d\.kind === "reset"\) \{\s*await GM\.deleteValue\(KEY\);\s*clearTab\(\);/.test(SRC));
@@ -565,9 +568,11 @@ test("newest alert link takes over; added-but-unsettled flows stop for a bag che
   // other model already added (active or expired) -> checkBag, never a fresh add that mixes models
   assert.strictEqual(L.armDecision("R499", added({ stage: "checkout", bagChecked: true }), now, TTL, Q).kind, "checkBag");
   assert.strictEqual(L.armDecision("R499", added({ ts: now - TTL - 1 }), now, TTL, Q).kind, "checkBag");
-  // expired same model (no add can be in flight) -> resume at the bag, settled or not (user report 08:15)
+  // expired same model: settled -> resume at the bag (user report 08:15); unsettled -> checkBag (review round 21:
+  // ttl counts from arming, an add sent near expiry may still be in flight)
   assert.strictEqual(L.armDecision("R499", added({ ts: now - TTL - 1, stage: "checkout", bagChecked: true }), now, TTL, P).kind, "resume");
-  assert.strictEqual(L.armDecision("R499", added({ ts: now - TTL - 1, atbPending: 2 }), now, TTL, P).kind, "resume");
+  assert.strictEqual(L.armDecision("R499", added({ ts: now - TTL - 1, atbPending: 2 }), now, TTL, P).kind, "checkBag");
+  assert.strictEqual(L.armDecision("R499", added({ ts: now - 10 * TTL, stage: "bag" }), now, TTL, P).kind, "checkBag");
   // active same model, not settled -> still checkBag (an add may be in flight)
   assert.strictEqual(L.armDecision("R499", added({ ts: now - 1000, atbPending: 2 }), now, TTL, P).kind, "checkBag");
   // added but metadata missing -> checkBag, never fresh-add
