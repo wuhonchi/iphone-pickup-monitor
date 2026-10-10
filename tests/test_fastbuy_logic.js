@@ -164,9 +164,9 @@ test("checkout/start landing outcomes", () => {
 
 // ---- v0.13/v0.14 safety ----
 
-test("FAST_CHECKOUT is off by default and @version is 0.26", () => {
+test("FAST_CHECKOUT is off by default and @version is 0.27", () => {
   assert.match(SRC, /^const FAST_CHECKOUT = false;/m);
-  assert.match(SRC, /^\/\/ @version\s+0\.26$/m);
+  assert.match(SRC, /^\/\/ @version\s+0\.27$/m);
 });
 
 test("owner id: random, and guarded writes need the stored owner to match", () => {
@@ -707,5 +707,22 @@ test("standby (埋伏) wiring (source)", () => {
   assert.ok(SRC.includes('const SB_MARK = (sb) => "[STANDBY " + sb.part + "] ";'));
   // the payment guard is untouched: standby only reaches the contact page
   assert.ok(SRC.includes('const FORBIDDEN_AUTOM = ["continue-button-placeOrder", "authorizePayment", "continue-button-review"];'));
+});
+test("standby state counts as a preloaded bag even after expiry (review round 23)", () => {
+  const now = 1e12, TTL = 5 * 60 * 1000;
+  const sb = { owner: "sb", standby: true, stage: "checkout", bagChecked: true, atb1: "ui", armedPart: "MJXV4ZA/A", part: "MJXV4ZA/A", name: "512GB Burgundy", ts: now - TTL - 1 };
+  assert.strictEqual(L.armDecision("R499", sb, now, TTL, "MJXX4ZA/A").kind, "checkBag"); // never a fresh add of another model
+  assert.strictEqual(L.armDecision("R499", sb, now, TTL, "MJXV4ZA/A").kind, "resume"); // same model -> bag re-check
+  assert.ok(SRC.includes('name: sb.label, atb1: "ui", bagChecked: true, standby: true'));
+});
+
+test("standby fire / contact timeout / dead page wiring (review round 23)", () => {
+  const fire = SRC.slice(SRC.indexOf("const sbFire = async"), SRC.indexOf("function sbWait"));
+  const guard = fire.indexOf("if (L.isActive(await load(), Date.now(), TTL_MS)) return sbWait(");
+  assert.ok(guard > 0 && guard < fire.indexOf("GM.setValue(KEY"), "no overwrite of a running flow");
+  assert.ok(/if \(!\(await waitFor\(\(\) => field\("firstName"\), 15000\)\)\) \{\n\s*await disarm\(\);\n\s*if \(st\.standby\) \{ sbSet\(null\); unmarkTitle\(\); \}/.test(SRC));
+  const endIdx = SRC.indexOf('if (st.standby) throw new Error("埋伏嘅 checkout 頁已經失效');
+  assert.ok(endIdx > SRC.indexOf("// 5. Checkout fulfillment") && endIdx < SRC.indexOf("  } catch (e) {\n    await disarm();\n    banner(\"停低：\""));
+  assert.ok(SRC.includes("【埋伏模式：付款前喺 Apple Pay 核對型號同數量"));
 });
 Promise.all(pending).then(() => console.log(passed + " tests passed"));
