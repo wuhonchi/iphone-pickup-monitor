@@ -3,8 +3,7 @@ name: iphone-pickup-monitor
 # cron-job.org dispatches this every minute. Each dispatched run owns the NEXT wall-clock minute
 # and checks every 5 s (07:00-09:30 HKT) or once (other times). Runs are NOT queued: the next one
 # warms up while the current one is still checking, so there is no hand-off gap.
-# The schedule below is a watchdog (--fallback): it never polls Apple; if no dispatch run was
-# created in the last 180 s it sends a Telegram alert that cron-job.org seems stopped.
+# The watchdog schedule (--fallback, alerts when cron-job.org stops) is currently disabled; see `on:`.
 on:
   workflow_dispatch:
     inputs:
@@ -16,8 +15,8 @@ on:
         description: "Override 5-second window HH:MM-HH:MM HKT (testing only)"
         type: string
         default: ""
-  schedule:
-    - cron: "*/30 * * * *"
+  # Watchdog schedule removed 2026-10-11 at the user's request (cron-job.org paused; no "cron stopped" alerts).
+  # To restore: add back `schedule: [cron: "*/30 * * * *"]` here.
 
 permissions:
   contents: write  # commit .state.json / .blocked back so runs remember what was alerted
